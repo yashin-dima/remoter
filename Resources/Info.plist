@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Remoter</string>
+    <key>CFBundleDisplayName</key>
+    <string>Remoter</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.remoter.Remoter</string>
+    <key>CFBundleExecutable</key>
+    <string>Remoter</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Окна не восстанавливаются при запуске.
+         Список проектов закрывается, как только проект открыт, — и macOS, восстанавливая окна
+         прошлого сеанса, поднимала только окно проекта, а список не показывала вовсе. Причём
+         окно приезжало пустым: id проекта из сохранённого состояния не восстанавливался, и вместо
+         проекта в нём было «Проект не найден». Проект — это живой ssh-канал и сессия Claude,
+         молча воскрешать такое всё равно не стоит: пусть каждый запуск начинается со списка. -->
+    <key>NSQuitAlwaysKeepsWindows</key>
+    <false/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Remoter</string>
+    <!-- Monaco раздаётся с 127.0.0.1 по http: без этого WebKit не пустит его на страницу.
+         По этому же локальному серверу приходят уведомления от хуков Claude. Наружу приложение
+         по http не ходит вообще. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

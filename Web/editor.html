@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Remoter</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%; overflow: hidden;
+      background: #1e1e1e;
+      font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    }
+    body.light { background: #ffffff; }
+
+    #single, #diff, #msg { position: absolute; inset: 0; }
+    #single, #diff { display: none; }
+
+    #msg {
+      display: flex; align-items: center; justify-content: center;
+      text-align: center; padding: 0 40px;
+      color: #7d7d82; user-select: none; -webkit-user-select: none;
+    }
+    body.light #msg { color: #86868b; }
+
+    /* Diff читается тем лучше, чем спокойнее фон: приглушаем заливку строк,
+       чтобы в глаза бросались сами изменённые символы, а не полосы целиком. */
+    .monaco-editor .line-insert { background-color: rgba(46, 160, 67, 0.16) !important; }
+    .monaco-editor .line-delete { background-color: rgba(248, 81, 73, 0.14) !important; }
+    .monaco-editor .char-insert { background-color: rgba(46, 160, 67, 0.34) !important; }
+    .monaco-editor .char-delete { background-color: rgba(248, 81, 73, 0.30) !important; }
+  </style>
+</head>
+<body>
+  <div id="single"></div>
+  <div id="diff"></div>
+  <div id="msg">Загрузка редактора…</div>
+
+  <script src="vs/loader.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>

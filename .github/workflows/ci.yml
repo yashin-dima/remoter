@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      # Тесты интеграционные — против настоящего sshd и git. Стенд (Tests/local-sshd.sh)
+      # поднимает sshd от текущего пользователя без sudo; если в раннере он не заведётся,
+      # зависящие от него тесты честно пропускаются (TestStand это отличает), а unit-часть
+      # всё равно прогоняется. Пути к данным уводим в /tmp, чтобы ничего не трогать вне раннера.
+      - name: Start test stand
+        run: ./Tests/local-sshd.sh || echo "стенд не поднялся — интеграционные тесты будут пропущены"
+
+      - name: Test
+        env:
+          REMOTER_STORE: /tmp/remoter-ci/store.json
+          REMOTER_HOME: /tmp/remoter-ci/home
+          REMOTER_SOCKETS: /tmp/remoter-ci-sockets
+          CLAUDE_CONFIG_DIR: /tmp/remoter-ci/claude
+        run: |
+          mkdir -p /tmp/remoter-ci/home /tmp/remoter-ci/claude /tmp/remoter-ci-sockets
+          # Если стенд поднялся, его переменные (REMOTER_TEST_*) он записал в окружение шага
+          # выше нельзя пробросить напрямую — поэтому здесь гоняем то, что не требует стенда;
+          # полный прогон со стендом делается локально (см. CONTRIBUTING.md).
+          swift test
+
+      - name: Stop test stand
+        if: always()
+        run: ./Tests/local-sshd.sh stop || true
