@@ -182,6 +182,9 @@ struct TerminalPane: NSViewRepresentable {
     let localEnv: [String]
     let handle: TerminalHandle
     let fontSize: CGFloat
+    /// Виден ли терминал сейчас (активная вкладка, развёрнутая панель). Смонтированы они все
+    /// и всегда — иначе переключение вкладки убивало бы работающего в ней Claude.
+    let isVisible: Bool
     /// Нажали ссылку (или путь к файлу) в терминале — решает окно проекта: путь оно откроет
     /// в редакторе, адрес — в браузере.
     let onOpenLink: (String) -> Void
@@ -190,6 +193,7 @@ struct TerminalPane: NSViewRepresentable {
         let term = DropTerminalView(frame: .zero)
         term.attachmentsDir = side.isClaude ? attachmentsDir : nil
         term.isClaude = side.isClaude
+        term.isVisible = isVisible
         term.onOpenLink = onOpenLink
 
         term.applyTheme()
@@ -257,6 +261,7 @@ struct TerminalPane: NSViewRepresentable {
         if view.font.pointSize != fontSize {
             view.font = TerminalTheme.font(size: fontSize)
         }
+        (view as? DropTerminalView)?.isVisible = isVisible
     }
 
     static func dismantleNSView(_ view: LocalProcessTerminalView, coordinator: ()) {
@@ -338,6 +343,14 @@ final class DropTerminalView: LocalProcessTerminalView {
     /// не прокрутить), а ⌘A выделяет строку ввода, а не весь экран.
     var isClaude = false
 
+    /// Видно ли этот терминал прямо сейчас.
+    ///
+    /// Смонтированы они все и всегда (иначе переключение вкладки убивало бы работающего в ней
+    /// Claude, а сворачивание панели — идущую сборку), поэтому «невидимый» терминал остаётся
+    /// полноценным view: лежит в дереве, занимает место, ловит события. Колесо над видимым
+    /// терминалом мог перехватить тот, что спрятан под ним, — отсюда этот флаг.
+    var isVisible = true
+
     /// Куда отдавать нажатую ссылку.
     var onOpenLink: ((String) -> Void)? {
         didSet { linkDelegate?.onOpenLink = onOpenLink }
@@ -406,6 +419,10 @@ final class DropTerminalView: LocalProcessTerminalView {
 
     /// true — колесо обработали сами.
     private func handleScroll(_ event: NSEvent) -> Bool {
+        // Спрятанный терминал (неактивная вкладка, свёрнутая панель) колесо не трогает: он всё
+        // ещё лежит в дереве и занимает место, но крутить его никто не просил.
+        guard isVisible else { return false }
+
         // Мышь отдана приложению (обычный терминал) — там SwiftTerm всё делает правильно сам:
         // колесо листает историю, а под vim и htop уходит в них.
         guard !allowMouseReporting, let window, event.window === window else { return false }
@@ -504,9 +521,25 @@ final class DropTerminalView: LocalProcessTerminalView {
         return menu
     }
 
+    /// В фокусе ли ЭТОТ терминал.
+    ///
+    /// Ключевая проверка, и вот почему. `performKeyEquivalent` AppKit рассылает по ДЕРЕВУ view,
+    /// а не по фокусу: первый, кто ответит «да», тот и обработал. Терминалов в окне несколько
+    /// (разговоры Claude + панель снизу), и все они смонтированы одновременно — значит ⌘V
+    /// перехватывал тот, кто просто раньше стоит в дереве. Вставка уходила в терминал внизу,
+    /// хотя человек печатал в Claude; ⌘V из редактора кода — туда же.
+    var isFocusedTerminal: Bool {
+        guard let responder = window?.firstResponder as? NSView else { return false }
+        return responder === self || responder.isDescendant(of: self)
+    }
+
     /// ⌘C / ⌘V / ⌘A. Через performKeyEquivalent, а не keyDown: до keyDown терминала эти сочетания
     /// доходят как обычный ввод и улетают в процесс — Ctrl+C он бы понял, а ⌘C просто пропал.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Не в фокусе — не наше дело. Пусть событие идёт дальше: к тому терминалу, в котором
+        // человек и работает, к редактору или в меню.
+        guard isFocusedTerminal else { return super.performKeyEquivalent(with: event) }
+
         guard event.modifierFlags.contains(.command),
               !event.modifierFlags.contains(.option),
               !event.modifierFlags.contains(.control),

@@ -125,7 +125,7 @@ struct WorkspaceView: View {
             if model.isTerminalReady {
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    terminalView(model.shellTerminal)
+                    terminalView(model.shellTerminal, isVisible: open)
                         .frame(height: panelH)
                 }
             }
@@ -192,7 +192,7 @@ struct WorkspaceView: View {
                 ClaudeBar(model: model, tab: tab)
                     .id(settings.scale)
                 Divider()
-                terminalView(tab.terminal)
+                terminalView(tab.terminal, isVisible: active)
             }
             .opacity(active ? 1 : 0)
             .allowsHitTesting(active)
@@ -200,7 +200,7 @@ struct WorkspaceView: View {
     }
 
     @ViewBuilder
-    private func terminalView(_ side: TerminalID) -> some View {
+    private func terminalView(_ side: TerminalID, isVisible: Bool) -> some View {
         TerminalPane(
             side: side,
             launch: model.conn.terminalLaunch,
@@ -210,6 +210,7 @@ struct WorkspaceView: View {
             localEnv: model.localEnv,
             handle: model.terminal,
             fontSize: CGFloat(settings.terminalFontSize),
+            isVisible: isVisible,
             onOpenLink: { link in model.openLink(link) }
         )
         // Поменялась папка проекта — терминал пересоздаётся: иначе он остался бы в старой.

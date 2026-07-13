@@ -46,6 +46,51 @@ final class TerminalDelegateTests: XCTestCase {
                        "ссылка ушла мимо приложения — значит, в NSWorkspace, где её и не открыть")
     }
 
+    /// Горячие клавиши работают в ТОМ терминале, где фокус.
+    ///
+    /// Баг, ради которого этот тест и написан: `performKeyEquivalent` AppKit рассылает по ДЕРЕВУ
+    /// view, а не по фокусу — первый, кто ответит «да», тот и обработал. Терминалов в окне
+    /// несколько, и все смонтированы разом, поэтому ⌘V перехватывал тот, кто просто раньше стоит
+    /// в дереве: человек печатал в Claude, а вставлялось в терминал внизу. По той же причине ⌘V
+    /// уводился и из редактора кода.
+    func testShortcutsGoToTheFocusedTerminalNotTheFirstInTheViewTree() async throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        window.contentView = container
+
+        // Первый в дереве — тот, кто раньше и перехватывал чужие сочетания.
+        let firstInTree = DropTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 300))
+        let focused = DropTerminalView(frame: NSRect(x: 0, y: 300, width: 800, height: 300))
+        container.addSubview(firstInTree)
+        container.addSubview(focused)
+
+        for term in [firstInTree, focused] {
+            // `cat` возвращает эхом всё, что в него вставили, — по нему и видно, кто получил ⌘V.
+            term.startProcess(executable: "/bin/cat", args: [],
+                              environment: Terminal.getEnvironmentVariables(termName: "xterm-256color"))
+        }
+        defer { firstInTree.process.terminate(); focused.process.terminate() }
+
+        window.makeFirstResponder(focused)
+
+        // Буфер обмена общий на систему — прогон тестов его перезапишет. Иначе вставку не проверить.
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("ВСТАВКА_СЮДА", forType: .string)
+
+        let paste = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9))
+
+        XCTAssertTrue(window.performKeyEquivalent(with: paste), "⌘V не обработал никто")
+
+        let landedWhereFocused = await waitForText("ВСТАВКА_СЮДА", in: focused, seconds: 10)
+        XCTAssertTrue(landedWhereFocused, "вставка ушла не в тот терминал, где фокус")
+        XCTAssertFalse(screenText(of: firstInTree).contains("ВСТАВКА_СЮДА"),
+                       "вставку перехватил терминал, который просто раньше стоит в дереве view")
+    }
+
     private func waitForText(_ needle: String, in view: DropTerminalView, seconds: Double) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
