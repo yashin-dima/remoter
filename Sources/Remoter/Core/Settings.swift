@@ -150,9 +150,10 @@ final class AppSettings: ObservableObject {
         previewTabs = defaults.object(forKey: "editor.previewTabs") as? Bool ?? true
 
         // Терминал внизу открыт сразу: сплошная стена текста Claude во весь экран пугает, а с
-        // терминалом под ней окно читается как рабочее место, а не как лог.
+        // терминалом под ней окно читается как рабочее место, а не как лог. Но главный здесь
+        // разговор — ему 70%, терминалу 30%.
         terminalPanelOpen = defaults.object(forKey: "terminal.panelOpen") as? Bool ?? true
-        let savedFraction = defaults.object(forKey: "terminal.panelFraction") as? Double ?? 0.5
+        let savedFraction = defaults.object(forKey: "terminal.panelFraction") as? Double ?? 0.3
         terminalPanelFraction = min(max(savedFraction, Self.terminalFractionRange.lowerBound),
                                     Self.terminalFractionRange.upperBound)
 

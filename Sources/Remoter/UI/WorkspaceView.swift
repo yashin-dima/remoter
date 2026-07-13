@@ -209,7 +209,8 @@ struct WorkspaceView: View {
             attachmentsDir: model.attachmentsDir,
             localEnv: model.localEnv,
             handle: model.terminal,
-            fontSize: CGFloat(settings.terminalFontSize)
+            fontSize: CGFloat(settings.terminalFontSize),
+            onOpenLink: { link in model.openLink(link) }
         )
         // Поменялась папка проекта — терминал пересоздаётся: иначе он остался бы в старой.
         .id(model.localPath + String(describing: side))
@@ -322,10 +323,10 @@ struct WorkspaceView: View {
         // кнопок. А окон открыто несколько, и первый вопрос к любому из них — «это какой
         // проект?». Центр — единственное место, где ответ виден, не приглядываясь.
         ToolbarItem(placement: .principal) {
-            HStack(spacing: D.s(8)) {
-                ProjectIconView(image: model.icon, isLocal: model.workspace.isLocal, size: D.s(18))
+            HStack(spacing: D.s(9)) {
+                ProjectIconView(image: model.icon, isLocal: model.workspace.isLocal, size: D.s(20))
 
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(model.workspace.name)
                         .font(.system(size: D.s(14), weight: .semibold))
                         .lineLimit(1)
@@ -335,6 +336,12 @@ struct WorkspaceView: View {
                         .lineLimit(1)
                 }
             }
+            // Плашка дышит: без отступов название липло к иконке и к краям, и заголовок читался
+            // как случайно втиснутый в щель между кнопками.
+            .padding(.horizontal, D.s(14))
+            .padding(.vertical, D.s(5))
+            .background(Theme.hover, in: RoundedRectangle(cornerRadius: D.s(8)))
+            .padding(.horizontal, D.s(8))
             .help(model.workspace.subtitle)
         }
 

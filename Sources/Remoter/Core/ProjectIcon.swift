@@ -59,8 +59,8 @@ enum ProjectIcon {
         return true
     }
 
-    /// Где обычно лежит favicon. Сначала перебираем известные места (это дёшево — один `test -f`
-    /// на каждое), и только потом ищем по дереву: `find` по большому репозиторию небесплатен.
+    /// Где обычно лежит favicon. Сначала пара очевидных мест (это дёшево — один `test -f`
+    /// на каждое), и только потом поиск по дереву.
     ///
     /// SVG сюда не берём: NSImage их не декодирует, и мы бы бережно положили в кэш то, что потом
     /// не нарисуется.
@@ -68,31 +68,54 @@ enum ProjectIcon {
         "favicon.ico", "favicon.png",
         "public/favicon.ico", "public/favicon.png",
         "static/favicon.ico", "static/favicon.png",
-        "assets/favicon.ico", "assets/favicon.png",
-        "src/favicon.ico", "src/favicon.png",
-        "app/favicon.ico", "app/favicon.png",
-        "web/favicon.ico", "dist/favicon.ico", "build/favicon.ico",
-        "public/apple-touch-icon.png", "apple-touch-icon.png",
-        "public/logo.png", "static/logo.png", "assets/logo.png",
+    ]
+
+    /// Каталоги, в которые лезть незачем: там лежат favicon'ы чужих библиотек, и первый
+    /// попавшийся был бы не наш.
+    private static let skipDirs = [
+        "node_modules", ".git", "vendor", "dist", "build", "target", "Pods",
+        ".venv", "venv", "__pycache__", ".next", ".nuxt", "coverage", ".build",
+    ]
+
+    /// Имена, которые считаем иконкой проекта, — в порядке убывания доверия.
+    private static let patterns = [
+        "favicon.ico", "favicon.png", "apple-touch-icon*.png", "icon.png", "logo.png",
     ]
 
     private static func find(conn: Connection, root: String) async -> String? {
-        // Один скрипт на весь перебор: два десятка отдельных ssh-команд — это два десятка
-        // круговых задержек, а так укладываемся в одну.
+        // Один скрипт на весь перебор: отдельная ssh-команда на каждую проверку — это отдельная
+        // круговая задержка на каждую, а так укладываемся в одну.
         let checks = candidates
             .map { "[ -f \(shq(root + "/" + $0)) ] && { printf '%s' \(shq(root + "/" + $0)); exit 0; }" }
             .joined(separator: "\n")
 
-        // Запасной путь: поискать по дереву неглубоко, обходя стороной node_modules и .git —
-        // в них favicon'ов чужих библиотек сотни, и первый попавшийся будет не наш.
+        let prune = skipDirs.map { "-name \(shq($0))" }.joined(separator: " -o ")
+        let names = patterns.map { "-iname \(shq($0))" }.joined(separator: " -o ")
+
+        // Ищем ГЛУБОКО, а не только в корне: в живых проектах favicon лежит где угодно —
+        // `src/main/resources/static/`, `app/assets/images/`, `web/public/`. Раньше поиск
+        // упирался в три уровня, и у половины проектов иконка просто не находилась.
+        //
+        // Из найденного берём самый мелкий по вложенности (иконка проекта лежит ближе к корню,
+        // чем иконка какого-нибудь примера внутри него), а среди равных — по порядку в patterns.
         let script = """
         \(checks)
-        find \(shq(root)) -maxdepth 3 \\
-          \\( -name node_modules -o -name .git -o -name vendor -o -name dist \\) -prune -o \\
-          \\( -iname 'favicon.ico' -o -iname 'favicon.png' \\) -print 2>/dev/null | head -n 1
+
+        list=$(find \(shq(root)) -maxdepth 7 \\
+          \\( \(prune) \\) -prune -o \\
+          -type f \\( \(names) \\) -print 2>/dev/null \\
+          | awk -F/ '{print NF"\\t"$0}' | sort -n | cut -f2-)
+        [ -n "$list" ] || exit 1
+
+        for p in \(patterns.map(shq).joined(separator: " ")); do
+          # шаблон имени -> шаблон конца пути
+          m=$(printf '%s\\n' "$list" | grep -i -m1 -- "/$(printf '%s' "$p" | sed 's/[.]/[.]/g; s/[*]/.*/g')$")
+          [ -n "$m" ] && { printf '%s' "$m"; exit 0; }
+        done
+        exit 1
         """
 
-        guard let r = try? await conn.sh(script, timeout: 20), r.ok else { return nil }
+        guard let r = try? await conn.sh(script, timeout: 30), r.ok else { return nil }
         let path = r.line
         return path.isEmpty ? nil : path
     }

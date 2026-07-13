@@ -314,6 +314,69 @@ extension WorkspaceModel {
         attachmentsTabID = tab.id
     }
 
+    // MARK: - Ссылки из терминала
+
+    /// Нажали ссылку в терминале.
+    ///
+    /// Адрес уходит в браузер, а **путь к файлу — в наш редактор**: Claude сыплет в чат путями
+    /// (`Sources/Core/Git.swift`, `src/app.py:42`), и открывать их системой бессмысленно — она
+    /// честно отвечает «не удалось найти программу», потому что это не URL. А файл вот он, рядом,
+    /// и открыть его надо там же, где на него и смотрят.
+    func openLink(_ raw: String) {
+        let link = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !link.isEmpty else { return }
+
+        if let url = URL(string: link), let scheme = url.scheme?.lowercased(),
+           ["http", "https", "mailto", "ftp"].contains(scheme) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        Task { await openPath(link) }
+    }
+
+    /// Что из ссылки считать путём к файлу.
+    ///
+    /// Claude печатает пути с указанием строки — `Git.swift:42`, `src/app.py:42:9` — и заворачивает
+    /// их в скобки и кавычки. Не отсечёшь хвост — файл просто «не найдётся», и клик по нему
+    /// покажет ошибку там, где всё на месте. Отдельной функцией, чтобы это проверялось тестом.
+    static func filePath(fromLink link: String) -> String {
+        // Обрамление снимаем ПЕРВЫМ: пока на конце висит `)`, номер строки в `(app.py:7)`
+        // не выглядит номером — и остаётся частью имени файла.
+        let junk = CharacterSet(charactersIn: "\"'()[]<>,. ").union(.whitespacesAndNewlines)
+        var path = link.trimmingCharacters(in: junk)
+        if let url = URL(string: path), url.scheme?.lowercased() == "file" { path = url.path }
+
+        // `:42` и `:42:9` — номера строки и колонки, а не часть имени.
+        while path.contains(":"), !path.hasSuffix("/"),
+              let last = path.split(separator: ":").last,
+              !last.isEmpty, last.allSatisfy(\.isNumber) {
+            path = String(path.dropLast(last.count + 1))
+        }
+        return path.trimmingCharacters(in: junk)
+    }
+
+    /// Путь из терминала → вкладка редактора.
+    private func openPath(_ link: String) async {
+        let path = Self.filePath(fromLink: link)
+        guard !path.isEmpty else { return }
+
+        // Относительный путь — от корня проекта: именно так его и печатает Claude.
+        let root = repoRoot ?? basePath
+        let abs = path.hasPrefix("/") || path.hasPrefix("~") ? path : root + "/" + path
+
+        guard await RemoteFS.exists(conn: conn, path: abs) else {
+            toast(.error, "Не нашёл файл «\(path)» в проекте")
+            return
+        }
+        guard await !RemoteFS.isDir(conn: conn, path: abs) else {
+            toast(.error, "«\(path)» — это папка, а не файл")
+            return
+        }
+
+        pane = .file
+        await openFile(abs)
+    }
+
     /// Claude начал отвечать / закончил. Приходит его же хуками (см. LocalWorkspace).
     /// Сессию находим по id — тому самому, что стоит в имени файла журнала.
     func setBusy(_ busy: Bool, session: String?) {

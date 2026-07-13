@@ -15,9 +15,11 @@ let package = Package(
         ),
         // Тесты гоняют настоящий ssh против локального sshd — то, что нельзя проверить
         // моками: разбор porcelain-вывода git, кавычки в путях, атомарная запись.
+        // SwiftTerm нужен и тестам: терминал у нас с подменённым делегатом (через него идёт ввод
+        // в процесс), и это надо проверять на настоящем SwiftTerm, а не на словах.
         .testTarget(
             name: "RemoterTests",
-            dependencies: ["Remoter"],
+            dependencies: ["Remoter", "SwiftTerm"],
             path: "Tests/RemoterTests"
         ),
     ],

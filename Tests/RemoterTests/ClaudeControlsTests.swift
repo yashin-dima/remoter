@@ -91,6 +91,27 @@ final class ClaudeControlsTests: XCTestCase {
         XCTAssertFalse(model.claudeTabs[0].remoteControl)
     }
 
+    /// Клик по пути, который Claude напечатал в чате, должен открывать ФАЙЛ.
+    ///
+    /// Раньше он уходил в NSWorkspace как URL, и macOS отвечала «не удалось найти программу»:
+    /// `Sources/Core/Git.swift:42` — не адрес. Отсюда разбор: номер строки, кавычки и скобки
+    /// к имени файла отношения не имеют.
+    func testFilePathIsExtractedFromWhatClaudePrints() {
+        let cases: [(String, String)] = [
+            ("Sources/Core/Git.swift", "Sources/Core/Git.swift"),
+            ("Sources/Core/Git.swift:42", "Sources/Core/Git.swift"),
+            ("src/app.py:42:9", "src/app.py"),
+            ("(src/app.py:7)", "src/app.py"),
+            ("\"Мои файлы/тест.swift\"", "Мои файлы/тест.swift"),
+            ("/srv/app/main.go:120", "/srv/app/main.go"),
+            ("file:///srv/app/main.go", "/srv/app/main.go"),
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(WorkspaceModel.filePath(fromLink: input), expected,
+                           "путь разобран неверно: \(input)")
+        }
+    }
+
     /// Заданное человеком имя приоритетнее автоматического заголовка вкладки.
     func testCustomTitleWinsOverAutoTitle() {
         var tab = tab()

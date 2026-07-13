@@ -182,10 +182,15 @@ struct TerminalPane: NSViewRepresentable {
     let localEnv: [String]
     let handle: TerminalHandle
     let fontSize: CGFloat
+    /// Нажали ссылку (или путь к файлу) в терминале — решает окно проекта: путь оно откроет
+    /// в редакторе, адрес — в браузере.
+    let onOpenLink: (String) -> Void
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let term = DropTerminalView(frame: .zero)
         term.attachmentsDir = side.isClaude ? attachmentsDir : nil
+        term.isClaude = side.isClaude
+        term.onOpenLink = onOpenLink
 
         term.applyTheme()
         term.font = TerminalTheme.font(size: fontSize)
@@ -263,6 +268,61 @@ struct TerminalPane: NSViewRepresentable {
 }
 
 
+/// Ссылку открываем МЫ, а не SwiftTerm.
+///
+/// По умолчанию он зовёт `NSWorkspace.open(URL(string: link))`, и на пути к файлу, который Claude
+/// печатает в чате (`Sources/Core/Git.swift`), macOS честно отвечает «не удалось найти программу»:
+/// это не URL. А хочется, чтобы такой путь открывался в редакторе — он же вот, рядом.
+///
+/// Перехватить иначе нельзя: `LocalProcessTerminalView` назначает делегатом самого себя, а
+/// `requestOpenLink` у него не реализован — его берут из расширения протокола, и переопределение
+/// в наследнике туда уже не попадёт (witness закреплён за дефолтом). Поэтому подменяем делегата
+/// прокси, который всё остальное честно пересылает обратно.
+final class LinkInterceptingDelegate: TerminalViewDelegate {
+    /// Настоящий делегат — сам LocalProcessTerminalView. Слабо: он нас и держит.
+    weak var inner: LocalProcessTerminalView?
+    var onOpenLink: ((String) -> Void)?
+
+    init(inner: LocalProcessTerminalView) { self.inner = inner }
+
+    func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        onOpenLink?(link)
+    }
+
+    // Всё прочее — как было. Пропусти хоть одно, и терминал перестанет работать: через делегата
+    // идёт и ввод в процесс (send), и смена размера окна.
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        inner?.send(source: source, data: data)
+    }
+    func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+        inner?.sizeChanged(source: source, newCols: newCols, newRows: newRows)
+    }
+    func setTerminalTitle(source: TerminalView, title: String) {
+        inner?.setTerminalTitle(source: source, title: title)
+    }
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        inner?.hostCurrentDirectoryUpdate(source: source, directory: directory)
+    }
+    func scrolled(source: TerminalView, position: Double) {
+        inner?.scrolled(source: source, position: position)
+    }
+    func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
+        inner?.rangeChanged(source: source, startY: startY, endY: endY)
+    }
+    func clipboardCopy(source: TerminalView, content: Data) {
+        inner?.clipboardCopy(source: source, content: content)
+    }
+    func clipboardRead(source: TerminalView) -> Data? {
+        inner?.clipboardRead(source: source)
+    }
+    func bell(source: TerminalView) {
+        inner?.bell(source: source)
+    }
+    func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {
+        inner?.iTermContent(source: source, content: content)
+    }
+}
+
 /// Терминал, который принимает файлы.
 ///
 /// Зачем: Claude умеет читать картинку по пути, но набирать этот путь руками — мучение.
@@ -274,12 +334,34 @@ final class DropTerminalView: LocalProcessTerminalView {
     /// до них дотянулся, и чтобы они не расползались по /tmp.
     var attachmentsDir: URL?
 
+    /// В этом терминале работает Claude. Отсюда две особенности: колесо уходит ему (иначе чат
+    /// не прокрутить), а ⌘A выделяет строку ввода, а не весь экран.
+    var isClaude = false
+
+    /// Куда отдавать нажатую ссылку.
+    var onOpenLink: ((String) -> Void)? {
+        didSet { linkDelegate?.onOpenLink = onOpenLink }
+    }
+
+    private var linkDelegate: LinkInterceptingDelegate?
+    private var wheelMonitor: Any?
+    /// Копилка «недокрученных» пикселей трекпада: одна строка за раз, а не рывок на десять.
+    private var scrollRemainder: CGFloat = 0
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
+
+        let proxy = LinkInterceptingDelegate(inner: self)
+        linkDelegate = proxy
+        terminalDelegate = proxy
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) не используется") }
+
+    deinit {
+        if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
+    }
 
     /// Красит терминал по ТЕКУЩЕЙ теме. Вызывается при создании и при каждой смене темы:
     /// цвета, взятые один раз при создании, оставляли тёмный терминал в посветлевшем окне —
@@ -296,6 +378,101 @@ final class DropTerminalView: LocalProcessTerminalView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTheme()
+    }
+
+    // MARK: - Колесо
+    //
+    // Claude Code — alt-screen приложение, которое САМО просит мышь (1000/1002/1003 + SGR): своей
+    // истории у alt-буфера нет, и прокрутить чат можно ТОЛЬКО отдав ему события колеса. Но мышь
+    // мы у него забрали (allowMouseReporting = false), иначе он перехватывал бы и выделение —
+    // и копировать было бы нечего. Значит колесо шлём ему сами, а клики оставляем себе.
+    //
+    // Почему не переопределить scrollWheel: он в SwiftTerm `public`, а не `open` — из другого
+    // модуля не переопределяется. Отсюда локальный монитор событий.
+    //
+    // И главное, чего здесь быть НЕ ДОЛЖНО: без нашего вмешательства SwiftTerm в alt-буфере
+    // превращает колесо в стрелки вверх/вниз — а стрелки в строке ввода Claude листают историю
+    // запросов и затирают набранное. Прокрутка, стирающая написанное, — худший из возможных исходов.
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, wheelMonitor == nil else { return }
+
+        wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, self.handleScroll(event) else { return event }
+            return nil   // событие наше — SwiftTerm его не увидит
+        }
+    }
+
+    /// true — колесо обработали сами.
+    private func handleScroll(_ event: NSEvent) -> Bool {
+        // Мышь отдана приложению (обычный терминал) — там SwiftTerm всё делает правильно сам:
+        // колесо листает историю, а под vim и htop уходит в них.
+        guard !allowMouseReporting, let window, event.window === window else { return false }
+
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return false }
+
+        let term = getTerminal()
+        let cell = cellSize
+        guard cell.height > 0, cell.width > 0 else { return false }
+
+        guard term.mouseMode != .off else {
+            // Приложение мышь не просило. В обычном буфере пусть SwiftTerm листает историю сам,
+            // а в alt-буфере — молчим: там он послал бы стрелки и затёр строку ввода.
+            return term.isCurrentBufferAlternate
+        }
+
+        let lines = scrollLines(for: event, cellHeight: cell.height)
+        guard lines > 0 else { return true }
+
+        let col = min(max(Int(point.x / cell.width), 0), max(term.cols - 1, 0))
+        let row = min(max(Int((bounds.height - point.y) / cell.height), 0), max(term.rows - 1, 0))
+
+        let flags = event.modifierFlags
+        let button = event.scrollingDeltaY > 0 ? 4 : 5   // 4 — вверх, 5 — вниз, как в xterm
+        let encoded = term.encodeButton(
+            button: button, release: false,
+            shift: flags.contains(.shift), meta: flags.contains(.option),
+            control: flags.contains(.control))
+
+        for _ in 0..<lines {
+            term.sendEvent(buttonFlags: encoded, x: col, y: row)
+        }
+        return true
+    }
+
+    /// Сколько строк прокрутить. У трекпада события частые и дробные — копим пиксели и отдаём
+    /// по строке за клетку: так прокрутка плавная, а не рывками по десять строк (от чего SwiftTerm
+    /// и «скроллил больно»).
+    private func scrollLines(for event: NSEvent, cellHeight: CGFloat) -> Int {
+        guard event.hasPreciseScrollingDeltas else {
+            scrollRemainder = 0
+            let ticks = max(Int(abs(event.scrollingDeltaY).rounded()), 1)
+            return min(ticks * 3, 15)   // колесо мыши: три строки на щелчок, как везде
+        }
+
+        let delta = event.scrollingDeltaY
+        if (delta < 0) != (scrollRemainder < 0) { scrollRemainder = 0 }   // сменили направление
+        scrollRemainder += delta
+
+        let lines = Int(abs(scrollRemainder) / cellHeight)
+        if lines > 0 {
+            scrollRemainder -= CGFloat(lines) * cellHeight * (scrollRemainder < 0 ? -1 : 1)
+        }
+        return min(lines, 10)
+    }
+
+    /// Размер клетки — ровно так же, как считает его SwiftTerm (см. computeFontDimensions).
+    /// Считать «ширина окна / число колонок» нельзя: там остаётся неучтённый остаток, и клик
+    /// у нижнего края попадал бы не в ту строку.
+    private var cellSize: CGSize {
+        let ct = font as CTFont
+        let height = ceil(CTFontGetAscent(ct) + CTFontGetDescent(ct) + CTFontGetLeading(ct))
+        let width = font.advancement(forGlyph: font.glyph(withName: "W")).width
+        let scale = window?.backingScaleFactor ?? 1
+        return CGSize(width: max(1, ceil(width * scale) / scale),
+                      height: max(1, ceil(height * scale) / scale))
     }
 
     // MARK: - Копирование и вставка
@@ -346,11 +523,45 @@ final class DropTerminalView: LocalProcessTerminalView {
             paste(self)   // наш paste: картинка из буфера станет файлом и подставится путём
             return true
         case "a":
-            selectAll(self)
+            // В окне Claude «выделить всё» означало «выделить весь экран разговора» — не то,
+            // чего ждёшь, нажимая ⌘A в строке ввода. Выделяем ту строку, в которой стоит курсор,
+            // то есть ровно набранное.
+            if isClaude { selectInputLine() } else { selectAll(self) }
             return true
         default:
             return super.performKeyEquivalent(with: event)
         }
+    }
+
+    /// Выделить строку, в которой стоит курсор.
+    ///
+    /// Диапазон выделения SwiftTerm наружу не отдаёт (SelectionService внутренний), зато отдаёт
+    /// тройной клик — он выделяет строку целиком. Его и разыгрываем в точке курсора: это не фокус
+    /// ради фокуса, а единственный публичный путь к выделению строки.
+    private func selectInputLine() {
+        let term = getTerminal()
+        let cell = cellSize
+        guard let window, cell.height > 0 else { return selectAll(self) }
+
+        let cursor = term.getCursorLocation()
+        let x = (CGFloat(cursor.x) + 0.5) * cell.width
+        let yFromTop = (CGFloat(cursor.y) + 0.5) * cell.height
+        let point = CGPoint(x: min(max(x, 0), bounds.width - 1),
+                            y: min(max(bounds.height - yFromTop, 0), bounds.height - 1))
+
+        guard let click = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: convert(point, to: nil),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 3,   // три и больше — «выделить строку»
+            pressure: 1
+        ) else { return selectAll(self) }
+
+        super.mouseDown(with: click)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
