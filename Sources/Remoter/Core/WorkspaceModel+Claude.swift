@@ -302,6 +302,18 @@ extension WorkspaceModel {
         sessionTitles[session.id] ?? session.title
     }
 
+    /// Картинки из разговора активной вкладки. Разбираем журнал по требованию — держать
+    /// мегабайты base64 в памяти ради значка со счётчиком незачем (см. ClaudeAttachments).
+    func attachments(of tab: ClaudeTab) async -> [ClaudeAttachments.Item] {
+        guard let journal = probes[tab.id]?.journal else { return [] }
+        return await Task.detached { ClaudeAttachments.list(in: journal) }.value
+    }
+
+    /// Открыть окно с картинками разговора.
+    func showAttachments(_ tab: ClaudeTab) {
+        attachmentsTabID = tab.id
+    }
+
     /// Claude начал отвечать / закончил. Приходит его же хуками (см. LocalWorkspace).
     /// Сессию находим по id — тому самому, что стоит в имени файла журнала.
     func setBusy(_ busy: Bool, session: String?) {
@@ -335,34 +347,14 @@ extension WorkspaceModel {
         }
     }
 
-    // MARK: - Терминалы на сервере
+    // MARK: - Нижний терминал
 
-    /// Открывает терминал на сервере — отдельной вкладкой, рядом с уже открытыми.
-    ///
-    /// Постоянной вкладки «Сервер» больше нет: она занимала место в ряду всегда, даже когда
-    /// в терминал не заходили неделями. Теперь он открывается по требованию — и его можно
-    /// открыть не один: пока в первом крутится хвост лога, во втором работают руками.
-    @discardableResult
-    func openShell() -> ShellTab {
-        let tab = ShellTab(id: UUID(), title: "Terminal \(shells.count + 1)")
-        shells.append(tab)
-        pane = .remote(tab.id)
-        terminal.focus(tab.terminal)   // терминала ещё нет — фокус ему отдадут, когда появится
-        return tab
-    }
-
-    func closeShell(_ id: UUID) {
-        guard let i = shells.firstIndex(where: { $0.id == id }) else { return }
-
-        terminal.forget(.remote(id))
-        shells.remove(at: i)
-
-        guard case .remote(let active) = pane, active == id else { return }
-        if let next = neighbor(in: shells, afterRemovalAt: i) {
-            pane = .remote(next.id)
-        } else {
-            pane = .file
-        }
+    /// Свернуть/развернуть панель терминала. Сам терминал при этом НЕ гибнет: свёрнутая панель —
+    /// это спрятанная панель, а не убитый процесс. Иначе свернуть окно посреди сборки означало бы
+    /// её оборвать.
+    func toggleTerminalPanel() {
+        isTerminalPanelOpen.toggle()
+        if isTerminalPanelOpen { terminal.focus(shellTerminal) }
     }
 
     // MARK: - Список прошлых сессий

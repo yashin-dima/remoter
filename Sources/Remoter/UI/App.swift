@@ -119,13 +119,12 @@ struct WorkspaceCommands: Commands {
                 .keyboardShortcut("t", modifiers: [.command, .shift])
                 .disabled(model == nil)
 
-            // У проекта на этом Mac сервера нет — терминал открывается в его же папке,
-            // и обещать в меню сервер нельзя.
-            Button(model?.workspace.isLocal == true
-                   ? "Новый терминал в папке проекта"
-                   : "Новый терминал на сервере") { model?.openShell() }
-                .keyboardShortcut("t", modifiers: [.command, .option])
-                .disabled(model == nil)
+            // Терминал — панель под окном, а не вкладка: пункт её сворачивает и разворачивает.
+            Button(model?.isTerminalPanelOpen == true ? "Свернуть терминал" : "Показать терминал") {
+                model?.toggleTerminalPanel()
+            }
+            .keyboardShortcut("t", modifiers: [.command, .option])
+            .disabled(model == nil)
 
             Button("Сессии Claude…") { model?.isSessionsPresented = true }
                 .keyboardShortcut("j", modifiers: [.command, .shift])

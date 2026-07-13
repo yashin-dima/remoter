@@ -24,11 +24,6 @@ enum ClaudeConfig {
     /// Уровень reasoning по умолчанию: его ставит `/effort`.
     static var effort: String? { string("effortLevel") }
 
-    /// Включает ли Claude Code remote-control при старте сессии. По нему выставляется начальное
-    /// состояние кнопки remote-control — иначе она врала бы, пока пользователь её не тронет.
-    /// Поле недокументированное, поэтому читаем мягко: нет — считаем, что выключено.
-    static var remoteControlAtStartup: Bool { bool("remoteControlAtStartup") }
-
     /// Размер контекстного окна для алиаса модели.
     ///
     /// Единственное, что здесь «знание»: у моделей Claude окно 200k, а суффикс `[1m]` просит
@@ -81,15 +76,5 @@ enum ClaudeConfig {
         }
         cache = (mtime, values)
         return values[key]
-    }
-
-    /// Булево поле настроек. Отдельно от `string()`: тот кэширует только строки (плашки читают
-    /// его на каждый рендер), а это читается редко — при создании вкладки, — и кэш ему не нужен.
-    private static func bool(_ key: String) -> Bool {
-        let file = ClaudeSessions.configDirectory.appendingPathComponent("settings.json")
-        guard let data = try? Data(contentsOf: file),
-              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return false }
-        return root[key] as? Bool ?? false
     }
 }

@@ -281,6 +281,8 @@ final class WorkspaceStore: ObservableObject {
 
     func remove(_ w: Workspace) {
         mutate { $0.removeAll { $0.id == w.id } }
+        // Иконку проекта тоже забываем: держать картинку удалённого проекта незачем.
+        ProjectIcon.forget(w.id)
     }
 
     /// Правку вносим в диск, а не в память: пока это окно было открыто, список мог измениться.

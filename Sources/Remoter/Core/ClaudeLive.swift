@@ -24,6 +24,12 @@ struct ClaudeLive: Equatable {
     /// занимает окно.
     var contextTokens: Int?
 
+    /// Сколько картинок в разговоре. Терминал их показать не может (это текст), и скриншот,
+    /// который вы бросили Claude, для вас исчезает — видно только «[Image #1]». Считаем их здесь,
+    /// чтобы показать счётчик, а сами картинки достаём из журнала по требованию
+    /// (см. ClaudeAttachments): держать мегабайты base64 в памяти ради значка незачем.
+    var attachments: Int = 0
+
     /// Алиас модели ровно в том виде, в каком его назвали в `/model` внутри сессии: `opus[1m]`,
     /// `sonnet`, `claude-fable-5`. Отдельно от `model` (там человеческое имя), потому что размер
     /// окна виден ТОЛЬКО здесь: `[1m]` — это просьба о миллионе, а в id модели её следа нет.
@@ -175,6 +181,20 @@ enum ClaudeJournal {
         // оттуда, кольцо контекста прыгало бы на цифры субагента, а плашка — на его модель.
         if contains(line, sidechainMarker) { return }
 
+        // Контекст сжали (/compact или авто) — прежние цифры больше ничего не значат. Честное
+        // состояние до первого ответа — «не посчитано»: кольцо гаснет, а не показывает старые 90%.
+        // Новые цифры приедут с ближайшим ответом Claude.
+        if contains(line, compactMarker) {
+            live.contextTokens = nil
+            return
+        }
+
+        // Картинка в разговоре. Считаем строки, а не сами блоки: строка — это одно сообщение,
+        // и «сколько раз в чат клали картинки» — ровно то число, которое имеет смысл показывать.
+        if contains(line, imageMarker) {
+            live.attachments += 1
+        }
+
         if contains(line, permissionMarker), let value = decode(line)?.permissionMode {
             live.permissions = ClaudePermissions(rawValue: value) ?? live.permissions
 
@@ -286,6 +306,11 @@ enum ClaudeJournal {
     private static let assistantMarker = Array(#""type":"assistant""#.utf8)
     private static let commandMarker = Array("<command-name>".utf8)
     private static let sidechainMarker = Array(#""isSidechain":true"#.utf8)
+    /// Запись о сжатии контекста: `{"type":"system","subtype":"compact_boundary",…}` —
+    /// её пишет и ручной `/compact`, и автосжатие.
+    private static let compactMarker = Array(#""subtype":"compact_boundary""#.utf8)
+    /// Блок картинки в сообщении: `{"type":"image","source":{"type":"base64",…}}`.
+    private static let imageMarker = Array(#""type":"image""#.utf8)
 
     private static func commandName(in text: String) -> String? {
         tag("command-name", in: text)

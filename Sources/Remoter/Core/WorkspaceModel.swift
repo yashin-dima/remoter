@@ -59,6 +59,10 @@ final class WorkspaceModel: ObservableObject {
 
     /// Корень проекта на сервере с разрешёнными симлинками. Именно от него строится дерево —
     /// см. пояснение в start().
+    /// Собственная иконка проекта (favicon из его же кода) — ею подписан заголовок окна и строка
+    /// в списке проектов. Нет иконки — nil, и рисуется штатная.
+    @Published var icon: NSImage?
+
     @Published private(set) var basePath: String = ""
     @Published private(set) var repoRoot: String?
     @Published private(set) var status = GitStatus.empty
@@ -121,8 +125,28 @@ final class WorkspaceModel: ObservableObject {
     @Published var claudeTabs: [ClaudeTab] = []
     @Published var isNewSessionPresented = false
 
-    /// Открытые терминалы на сервере.
-    @Published var shells: [ShellTab] = []
+    // MARK: - Нижняя панель терминала
+    //
+    // Раньше терминал был отдельной вкладкой — и это была ошибка. Вкладка с текстом поверх вкладки
+    // с текстом ничего не давала: посмотреть на вывод команды, не уходя с разговора (или с diff'а),
+    // было нельзя, а окно Claude оставалось сплошной стеной текста во весь экран.
+    //
+    // Теперь терминал живёт ПОД тем, что открыто: он всегда под рукой, сворачивается одной кнопкой,
+    // и границу между ним и содержимым можно двигать. Один на окно — как в VS Code.
+
+    /// Терминал окна. Id постоянный: пересоздай его — и работающая в нём сборка умрёт.
+    let shellID = UUID()
+    var shellTerminal: TerminalID { .remote(shellID) }
+
+    @Published var isTerminalPanelOpen: Bool = AppSettings.shared.terminalPanelOpen {
+        didSet { AppSettings.shared.terminalPanelOpen = isTerminalPanelOpen }
+    }
+
+    /// Какую долю высоты занимает терминал. Запоминается на приложение: раскладка — привычка
+    /// человека, а не свойство проекта.
+    @Published var terminalPanelFraction: Double = AppSettings.shared.terminalPanelFraction {
+        didSet { AppSettings.shared.terminalPanelFraction = terminalPanelFraction }
+    }
 
     var activeClaudeTab: ClaudeTab? {
         guard case .claude(let id) = pane else { return nil }
@@ -167,6 +191,9 @@ final class WorkspaceModel: ObservableObject {
     /// Какую вкладку сейчас переименовывают и что набрано в поле. Пусто — диалог закрыт.
     @Published var renamingTabID: UUID?
     @Published var renameText: String = ""
+
+    /// Чьи вложения показываем. Пусто — окно закрыто.
+    @Published var attachmentsTabID: UUID?
 
     /// Локальная папка проекта на Mac — рабочий каталог Claude. См. LocalWorkspace.
     @Published private(set) var localPath: String = ""
@@ -219,6 +246,8 @@ final class WorkspaceModel: ObservableObject {
     init(workspace: Workspace) {
         self.workspace = workspace
         self.basePath = workspace.path
+        // Иконку, найденную в прошлый раз, показываем сразу — не дожидаясь, пока поиск повторится.
+        self.icon = ProjectIcon.cached(for: workspace.id)
 
         // Реестр моделей: по нему уведомление находит своё окно. Ссылки слабые — закрытое окно
         // должно исчезать само, а не жить вечно из-за того, что где-то на него держат список.
@@ -314,6 +343,15 @@ final class WorkspaceModel: ObservableObject {
 
         startPolling()
         Task { await loadQuickOpenIndex() }
+
+        // Иконка проекта — его собственный favicon из кода. Ищем в фоне: список проектов покажет
+        // её при следующем открытии, а ради картинки задерживать открытие незачем.
+        Task { [conn, basePath, workspace] in
+            let root = repoRoot ?? basePath
+            if await ProjectIcon.discover(conn: conn, root: root, id: workspace.id) {
+                icon = ProjectIcon.cached(for: workspace.id)
+            }
+        }
     }
 
     func stop() {
@@ -327,6 +365,14 @@ final class WorkspaceModel: ObservableObject {
         refreshChain = nil
         for task in permissionTasks.values { task.cancel() }
         permissionTasks.removeAll()
+
+        // Окно закрыли — сессии в нём ГАСНУТ, а не продолжают жить невидимками. Разговоры при
+        // этом целы (журнал ведёт Claude), но сам процесс обязан умереть: иначе закрытый проект
+        // висел бы «активной сессией» в remote-control на телефоне, ел батарею и токены.
+        // На размонтирование view полагаться нельзя — оно не гарантировано при закрытии окна.
+        for tab in claudeTabs { terminal.forget(tab.terminal) }
+        terminal.forget(shellTerminal)
+
         conn.disconnect()
     }
 

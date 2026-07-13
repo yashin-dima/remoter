@@ -80,10 +80,49 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(previewTabs, forKey: "editor.previewTabs") }
     }
 
+    /// Открыта ли нижняя панель терминала и сколько места она занимает (доля высоты).
+    /// Запоминаются на приложение: раскладка — привычка человека, а не свойство проекта.
+    @Published var terminalPanelOpen: Bool {
+        didSet { defaults.set(terminalPanelOpen, forKey: "terminal.panelOpen") }
+    }
+
+    @Published var terminalPanelFraction: Double {
+        didSet { defaults.set(terminalPanelFraction, forKey: "terminal.panelFraction") }
+    }
+
+    /// Границы доли терминала: и ему, и тому, что сверху, всегда остаётся рабочее место.
+    static let terminalFractionRange = 0.15...0.75
+
     private let defaults: UserDefaults
+
+    /// Прежние bundle id приложения. UserDefaults живут в файле, названном ПО bundle id, —
+    /// смена id (com.yashin.remoter → app.remoter.Remoter при выходе в open source) оставила
+    /// все настройки в старом файле, и у людей «слетели» масштаб и звуки. Недопустимо: при
+    /// первом запуске под новым id все ключи переносятся из старых доменов. Разово — дальше
+    /// живём в своём домене, и обычные обновления настройки не трогают вовсе.
+    private static let legacyDomains = ["com.yashin.remoter"]
+    private static let migrationKey = "migration.defaults.v1"
+
+    private static func migrateLegacyDefaults(into defaults: UserDefaults) {
+        guard !defaults.bool(forKey: migrationKey) else { return }
+        defaults.set(true, forKey: migrationKey)
+
+        for domain in legacyDomains {
+            guard let old = UserDefaults.standard.persistentDomain(forName: domain) else { continue }
+            for (key, value) in old where defaults.object(forKey: key) == nil {
+                defaults.set(value, forKey: key)
+            }
+        }
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+
+        // Под тестами не мигрируем: xctest подхватил бы старый домен в свой, и прогоны
+        // зависели бы от того, что лежит у разработчика в старых настройках.
+        if !TestIsolation.isRunningTests {
+            Self.migrateLegacyDefaults(into: defaults)
+        }
 
         let saved = defaults.object(forKey: "ui.scale") as? Double ?? 1
         scale = min(max(saved, Self.scaleRange.lowerBound), Self.scaleRange.upperBound)
@@ -109,6 +148,13 @@ final class AppSettings: ObservableObject {
         longContext = defaults.object(forKey: "claude.longContext") as? Bool ?? true
         resumeLastSession = defaults.object(forKey: "claude.resumeLast") as? Bool ?? true
         previewTabs = defaults.object(forKey: "editor.previewTabs") as? Bool ?? true
+
+        // Терминал внизу открыт сразу: сплошная стена текста Claude во весь экран пугает, а с
+        // терминалом под ней окно читается как рабочее место, а не как лог.
+        terminalPanelOpen = defaults.object(forKey: "terminal.panelOpen") as? Bool ?? true
+        let savedFraction = defaults.object(forKey: "terminal.panelFraction") as? Double ?? 0.5
+        terminalPanelFraction = min(max(savedFraction, Self.terminalFractionRange.lowerBound),
+                                    Self.terminalFractionRange.upperBound)
 
         D.scale = CGFloat(scale)
     }

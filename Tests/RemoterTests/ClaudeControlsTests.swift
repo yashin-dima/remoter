@@ -72,16 +72,23 @@ final class ClaudeControlsTests: XCTestCase {
 
     /// Remote-control — переключатель: клик шлёт `/remote-control` и инвертирует наш флаг
     /// (надёжно прочитать его из журнала нельзя).
-    func testRemoteControlToggles() {
+    ///
+    /// И главное — новая сессия стартует с ВЫКЛЮЧЕННЫМ режимом. Гадать по настройкам Claude
+    /// пробовали: кнопка «светилась» там, где режим на самом деле не включён, а подсвеченная
+    /// кнопка выключенного режима хуже, чем никакой подсветки вовсе.
+    func testRemoteControlStartsOffAndToggles() {
         let model = model()
         let tab = tab()
         model.claudeTabs.append(tab)
-        let before = model.claudeTabs[0].remoteControl
+
+        XCTAssertFalse(model.claudeTabs[0].remoteControl, "remote-control светится, хотя не включён")
 
         model.toggleRemoteControl(tab)
-
-        XCTAssertEqual(model.claudeTabs[0].remoteControl, !before, "флаг remote-control не переключился")
+        XCTAssertTrue(model.claudeTabs[0].remoteControl, "флаг remote-control не переключился")
         XCTAssertEqual(model.terminal.pendingCommand(for: tab.terminal), "/remote-control")
+
+        model.toggleRemoteControl(tab)
+        XCTAssertFalse(model.claudeTabs[0].remoteControl)
     }
 
     /// Заданное человеком имя приоритетнее автоматического заголовка вкладки.

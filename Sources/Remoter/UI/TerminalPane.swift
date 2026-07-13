@@ -98,8 +98,20 @@ final class TerminalHandle: ObservableObject {
         wantsFocus.remove(side)
     }
 
+    /// Пауза между текстом команды и Enter. Меньше 150 мс TUI Claude иногда склеивает их
+    /// в одну «вставку»; полсекунды уже заметны глазу. 250 — надёжно и неощутимо.
+    private static let enterDelay: TimeInterval = 0.25
+
     private func send(_ command: String, to view: LocalProcessTerminalView) {
-        view.process.send(data: ArraySlice(Array((command + "\n").utf8)))
+        // Enter уходит ОТДЕЛЬНОЙ посылкой, с паузой. Слэш-команды попадают не в шелл, а в TUI
+        // Claude: он видит «/model opus\n» одним куском, считает это вставкой текста — и перевод
+        // строки становится частью ввода, а не подтверждением. Команда просто лежала в строке,
+        // пока Enter не нажимали руками. Раздельная отправка читается как «набрали и нажали».
+        view.process.send(data: ArraySlice(Array(command.utf8)))
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.enterDelay) { [weak view] in
+            guard let view else { return }
+            view.process.send(data: ArraySlice(Array("\r".utf8)))
+        }
     }
 }
 
@@ -177,6 +189,25 @@ struct TerminalPane: NSViewRepresentable {
 
         term.applyTheme()
         term.font = TerminalTheme.font(size: fontSize)
+
+        // Ссылки: подчёркиваются под курсором и открываются обычным кликом, без Cmd.
+        // По умолчанию SwiftTerm требует Cmd — а в терминале, где Claude сыплет ссылками
+        // на файлы и доки, «нажал и ничего» читается как сломанная ссылка.
+        term.linkHighlightMode = .hover
+
+        // Мышь — НАМ, а не TUI. Это ключевая настройка, и вот почему.
+        //
+        // Claude Code включает mouse reporting, и SwiftTerm честно отдаёт ему всё: колесо уходит
+        // в приложение событиями кнопок 4/5 (Claude их не обрабатывает — и терминал не скроллится
+        // вовсе), а зажатая мышь — событиями клика (и текст невозможно выделить, то есть и
+        // скопировать). Ровно на это и жаловались: «скролл — боль», «ничего не скопировать».
+        //
+        // Выключаем репортинг: колесо снова листает историю, а выделение работает обычным
+        // перетаскиванием. Claude Code клавиатурный, мышь ему не нужна.
+        //
+        // В обычном терминале репортинг ОСТАЁТСЯ: там он нужен живым TUI (vim, htop, mc). Выделять
+        // под ними можно с Shift — стандартное поведение Terminal.app и iTerm.
+        term.allowMouseReporting = !side.isClaude
 
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
@@ -265,6 +296,61 @@ final class DropTerminalView: LocalProcessTerminalView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyTheme()
+    }
+
+    // MARK: - Копирование и вставка
+    //
+    // SwiftTerm умеет copy/paste/selectAll, но НИКАК их не предлагает: контекстного меню у него
+    // нет вовсе (правый клик не делает ничего), а горячие клавиши работают только если в меню
+    // приложения есть стандартные пункты Правки, которых у нас не было. Итог — «из терминала
+    // ничего не скопировать». Даём и меню, и клавиши.
+
+    /// Правый клик — обычное меню, как в любом терминале.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+
+        let copy = NSMenuItem(title: "Копировать", action: #selector(copy(_:)), keyEquivalent: "c")
+        copy.target = self
+        copy.isEnabled = selectionActive
+        menu.addItem(copy)
+
+        let paste = NSMenuItem(title: "Вставить", action: #selector(paste(_:)), keyEquivalent: "v")
+        paste.target = self
+        menu.addItem(paste)
+
+        menu.addItem(.separator())
+
+        let all = NSMenuItem(title: "Выделить всё", action: #selector(selectAll(_:)), keyEquivalent: "a")
+        all.target = self
+        menu.addItem(all)
+
+        return menu
+    }
+
+    /// ⌘C / ⌘V / ⌘A. Через performKeyEquivalent, а не keyDown: до keyDown терминала эти сочетания
+    /// доходят как обычный ввод и улетают в процесс — Ctrl+C он бы понял, а ⌘C просто пропал.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command),
+              !event.modifierFlags.contains(.option),
+              !event.modifierFlags.contains(.control),
+              let key = event.charactersIgnoringModifiers?.lowercased()
+        else { return super.performKeyEquivalent(with: event) }
+
+        switch key {
+        case "c":
+            // Без выделения ⌘C — не копирование: пусть уходит дальше по цепочке, как и был.
+            guard selectionActive else { return super.performKeyEquivalent(with: event) }
+            copy(self)
+            return true
+        case "v":
+            paste(self)   // наш paste: картинка из буфера станет файлом и подставится путём
+            return true
+        case "a":
+            selectAll(self)
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }

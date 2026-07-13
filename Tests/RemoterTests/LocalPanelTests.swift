@@ -268,40 +268,35 @@ final class LocalPanelTests: XCTestCase {
                      "терминал закрытой сессии остался висеть")
     }
 
-    /// Терминал на сервере — вкладка, которую открывают, а не постоянный жилец в ряду.
+    /// Терминал — панель ПОД содержимым окна, а не вкладка рядом с ним.
     ///
-    /// Раньше вкладка «Сервер» висела всегда, даже когда в терминал не заходили неделями,
-    /// и была ровно одна. Теперь их открывают из раздела Terminal — столько, сколько нужно:
-    /// пока в одном крутится хвост лога, во втором работают руками.
-    func testTerminalsOpenAsSeparateTabsAndCloseIndependently() async throws {
+    /// Вкладкой он был ошибкой: вывод команды и разговор с Claude нужны одновременно, а вкладка
+    /// показывает что-то одно. Теперь он сворачивается кнопкой — и, главное, СВОРАЧИВАЕТСЯ,
+    /// а не закрывается: id терминала не меняется, значит идущая в нём сборка переживает
+    /// сворачивание.
+    func testTerminalPanelCollapsesWithoutKillingTheTerminal() async throws {
         let model = try await started()
         defer { model.stop() }
 
-        XCTAssertTrue(model.shells.isEmpty, "терминал открылся сам, хотя его не просили")
+        // Вкладок терминала не существует вовсе — только сессии Claude и файлы.
+        XCTAssertEqual(model.shellTerminal, .remote(model.shellID))
 
-        let first = model.openShell()
-        let second = model.openShell()
+        let before = model.shellTerminal
+        let wasOpen = model.isTerminalPanelOpen
 
-        XCTAssertEqual(model.shells.count, 2, "второй терминал не открылся рядом с первым")
-        XCTAssertNotEqual(first.terminal, second.terminal, "терминалы делят один ssh")
-        XCTAssertEqual(model.pane, .remote(second.id), "не переключились на открытый терминал")
+        model.toggleTerminalPanel()
+        XCTAssertEqual(model.isTerminalPanelOpen, !wasOpen, "панель не переключилась")
+        XCTAssertEqual(model.shellTerminal, before,
+                       "сворачивание пересоздало терминал — идущая в нём сборка бы оборвалась")
 
-        // Открытые терминалы видны вкладками — к ним и возвращаются кликом по вкладке.
-        // Отдельного «показать последний» больше нет: кнопка в тулбаре всегда открывает новый,
-        // как плюс для сессий, и это одно понятное правило вместо двух.
+        model.toggleTerminalPanel()
+        XCTAssertEqual(model.isTerminalPanelOpen, wasOpen)
+        XCTAssertEqual(model.shellTerminal, before)
+
+        // Панель не вкладка: что открыто в окне (разговор или файл), от неё не зависит.
         model.pane = .file
-        model.pane = .remote(second.id)
-        XCTAssertEqual(model.shells.count, 2, "переключение на вкладку открыло ещё один терминал")
-
-        // Закрыли один — второй на месте, и мы вернулись именно к нему.
-        model.closeShell(second.id)
-        XCTAssertEqual(model.shells.map(\.id), [first.id], "закрыли не тот терминал")
-        XCTAssertEqual(model.pane, .remote(first.id))
-
-        // Закрыли последний — уходим в редактор, а не в пустую вкладку.
-        model.closeShell(first.id)
-        XCTAssertTrue(model.shells.isEmpty)
-        XCTAssertEqual(model.pane, .file)
+        model.toggleTerminalPanel()
+        XCTAssertEqual(model.pane, .file, "переключение терминала увело с открытой вкладки")
     }
 
     /// Локальный файл открывается вкладкой, правится и сохраняется НА ДИСК — не на сервер.

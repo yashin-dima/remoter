@@ -39,6 +39,60 @@ final class LiveSessionTests: XCTestCase {
         SessionProbe(id: UUID(), startedAt: Date().addingTimeInterval(-1), resumed: id)
     }
 
+    // MARK: - Сжатие контекста и вложения
+
+    /// После `/compact` кольцо контекста обязано ЗАБЫТЬ прежние цифры.
+    ///
+    /// Иначе оно врёт ровно там, где важнее всего: контекст сжали до пары процентов, а кольцо
+    /// продолжает показывать 90% и требовать сжать снова. Занятое станет известно с ближайшим
+    /// ответом Claude — до тех пор честный ответ «не посчитано», а не старое число.
+    func testCompactResetsContextRing() throws {
+        try append([
+            #"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":180000,"output_tokens":500}}}"#,
+        ], to: "s")
+
+        var p = probe(resuming: "s")
+        p = ClaudeJournal.follow(in: dir, probes: [p])[0]
+        XCTAssertEqual(p.live.contextTokens, 180_500, "занятый контекст не посчитался")
+
+        // Сжали — Claude пишет об этом служебную запись.
+        try append([
+            #"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"manual","preTokens":180500}}"#,
+        ], to: "s")
+        p = ClaudeJournal.follow(in: dir, probes: [p])[0]
+        XCTAssertNil(p.live.contextTokens, "после /compact кольцо показывает прежние 90% — оно врёт")
+
+        // Первый же ответ после сжатия даёт новые, честные цифры.
+        try append([
+            #"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":12000,"output_tokens":300}}}"#,
+        ], to: "s")
+        p = ClaudeJournal.follow(in: dir, probes: [p])[0]
+        XCTAssertEqual(p.live.contextTokens, 12_300)
+    }
+
+    /// Картинки в разговоре считаются: терминал их показать не может, и без счётчика скриншот,
+    /// который вы дали Claude, для вас исчезает совсем.
+    func testImagesInConversationAreCounted() throws {
+        try append([
+            #"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"вот скриншот"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}]}}"#,
+            #"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8"}}"#,
+            #"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BBB"}}]}}"#,
+        ], to: "s")
+
+        let p = ClaudeJournal.follow(in: dir, probes: [probe(resuming: "s")])[0]
+        XCTAssertEqual(p.live.attachments, 2, "картинки в разговоре не посчитались")
+    }
+
+    /// Сайдчейн — переписка подагента. Его картинки к разговору отношения не имеют.
+    func testSubagentImagesAreNotCounted() throws {
+        try append([
+            #"{"isSidechain":true,"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAA"}}]}}"#,
+        ], to: "s")
+
+        let p = ClaudeJournal.follow(in: dir, probes: [probe(resuming: "s")])[0]
+        XCTAssertEqual(p.live.attachments, 0)
+    }
+
     // MARK: -
 
     /// Главное: `/effort xhigh`, набранный в терминале, доезжает до плашки.

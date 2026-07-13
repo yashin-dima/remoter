@@ -82,9 +82,11 @@ struct ClaudeTab: Identifiable, Equatable {
 
     /// Включён ли для этой сессии remote-control — управление с телефона/браузера через
     /// приложение Claude (и push-уведомления через него же). Состояние наше, оптимистичное:
-    /// надёжного способа прочитать его из журнала нет, поэтому знаем ровно то, что сами включали.
-    /// Начальное — как в настройках Claude Code (`remoteControlAtStartup`).
-    var remoteControl = ClaudeConfig.remoteControlAtStartup
+    /// надёжного способа прочитать его из журнала нет, поэтому знаем ровно то, что сами включали
+    /// кнопкой. Начальное — выключено: гадать по настройкам Claude (`remoteControlAtStartup`)
+    /// пробовали — поле недокументированное и с реальностью не совпадает, кнопка «светилась»
+    /// у выключенного режима.
+    var remoteControl = false
 
     var terminal: TerminalID { .claude(id) }
 
@@ -140,30 +142,19 @@ struct ClaudeTab: Identifiable, Equatable {
     }
 }
 
-/// Открытый терминал на сервере — вкладка со своим ssh.
-///
-/// Их может быть несколько по той же причине, что и сессий Claude: пока в одном крутится хвост
-/// лога, во втором работают руками. Постоянной вкладки «Сервер» больше нет — терминал появляется,
-/// когда он нужен, и закрывается, когда не нужен.
-struct ShellTab: Identifiable, Equatable {
-    let id: UUID
-    var title: String
-
-    var terminal: TerminalID { .remote(id) }
-}
-
 /// Вкладки основной области окна.
+///
+/// Терминала здесь больше нет: он не вкладка, а панель ПОД содержимым окна (см. WorkspaceModel).
+/// Вкладка с текстом поверх вкладки с текстом ничего не давала — вывод команды и разговор с Claude
+/// нужны одновременно, а не по очереди.
 enum Pane: Hashable {
     /// Разговор с Claude. Их может быть несколько — по вкладке на каждый.
     case claude(UUID)
-    /// Терминал на сервере. Тоже вкладка, тоже не одна.
-    case remote(UUID)
     case file
 
     var terminal: TerminalID? {
         switch self {
         case .claude(let id): return .claude(id)
-        case .remote(let id): return .remote(id)
         case .file:           return nil
         }
     }

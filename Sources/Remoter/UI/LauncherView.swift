@@ -217,6 +217,12 @@ private struct ProjectCard: View {
         workspace.isLocal ? "laptopcomputer" : "shippingbox.fill"
     }
 
+    /// Собственный favicon проекта, если он нашёлся в его коде при прошлом открытии.
+    /// Соединения у списка нет и быть не должно — берём из кэша (см. ProjectIcon).
+    private var favicon: NSImage? {
+        ProjectIcon.cached(for: workspace.id)
+    }
+
     /// Безымянный проект называем тем, что о нём известно: сервером или именем папки.
     /// У локального хост пуст — строка заголовка иначе оказалась бы пустой.
     private var title: String {
@@ -226,11 +232,24 @@ private struct ProjectCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: D.s(20)))
-                .foregroundStyle(.tint)
-                .frame(width: 30)
-                .help(workspace.isLocal ? "Папка на этом Mac" : "Проект на сервере")
+            // Свой favicon, если он у проекта есть, — по нему проект узнаётся мгновенно, не читая
+            // название. Нет — штатная иконка, по которой видно хотя бы вид проекта.
+            Group {
+                if let favicon {
+                    Image(nsImage: favicon)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: D.s(22), height: D.s(22))
+                        .clipShape(RoundedRectangle(cornerRadius: D.s(5)))
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: D.s(20)))
+                        .foregroundStyle(.tint)
+                }
+            }
+            .frame(width: 30)
+            .help(workspace.isLocal ? "Папка на этом Mac" : "Проект на сервере")
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {

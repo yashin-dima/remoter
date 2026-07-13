@@ -128,6 +128,7 @@ struct ClaudeBar: View {
                     .help("Установите Claude Code локально — на сервер его ставить не нужно.")
             }
 
+            if tab.live.attachments > 0 { attachmentsButton }
             remoteControlButton
             if tab.isBusy { stopButton }
             attachButton
@@ -157,6 +158,28 @@ struct ClaudeBar: View {
         }
         .buttonStyle(.plain)
         .help("Показать расход лимитов (/usage) — откроется в терминале сессии.")
+    }
+
+    /// Картинки, которые есть в разговоре. Терминал их показать не может — бросили Claude
+    /// скриншот, и он для вас исчез, остался «[Image #1]». Здесь их видно.
+    private var attachmentsButton: some View {
+        Button {
+            model.showAttachments(tab)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "photo.on.rectangle")
+                    .font(.system(size: D.s(11), weight: .medium))
+                Text("\(tab.live.attachments)")
+                    .font(.system(size: D.s(12), weight: .medium))
+            }
+            .foregroundStyle(Theme.secondary)
+            .padding(.horizontal, 10)
+            .frame(height: D.s(26))
+            .background(Theme.hover, in: RoundedRectangle(cornerRadius: D.Size.radius))
+            .contentShape(RoundedRectangle(cornerRadius: D.Size.radius))
+        }
+        .buttonStyle(.plain)
+        .help("Картинки в этом разговоре — терминал их показать не может, а посмотреть иногда нужно.")
     }
 
     /// Управление сессией с телефона и push-уведомления через приложение Claude. Подсвечена,

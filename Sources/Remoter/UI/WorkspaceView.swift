@@ -87,11 +87,10 @@ struct WorkspaceView: View {
         }
     }
 
-    /// Всё, что не боковая панель: вкладки и то, что в них.
+    /// Всё, что не боковая панель: ряд вкладок, содержимое вкладки — и терминал под ним.
     ///
-    /// Вкладки терминалов и файлов живут в одном ряду, а содержимое — в одном ZStack. Терминалы
-    /// при этом смонтированы ВСЕГДА, просто невидимы: размонтируй их при переключении — и
-    /// запущенный в них Claude умрёт вместе с view.
+    /// Терминалы смонтированы ВСЕГДА, просто невидимы: размонтируй их при переключении — и
+    /// запущенный в них Claude (или идущая сборка) умрёт вместе с view.
     @ViewBuilder
     private var detail: some View {
         VStack(spacing: 0) {
@@ -99,18 +98,75 @@ struct WorkspaceView: View {
                 .id(settings.scale)
             Divider()
 
-            ZStack {
-                editor
-                    .opacity(model.pane == .file ? 1 : 0)
-                    .allowsHitTesting(model.pane == .file)
-
-                if model.isTerminalReady {
-                    terminals
-                }
+            GeometryReader { geo in
+                split(total: geo.size.height)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.surface)
+    }
+
+    /// Высота ручки-разделителя между содержимым и терминалом.
+    private let handleHeight: CGFloat = 9
+
+    /// Содержимое вкладки сверху, терминал снизу.
+    ///
+    /// Устроено ZStack'ом, а не простым VStack, ровно по одной причине: свёрнутая панель не имеет
+    /// права убивать терминал. Терминал лежит СНИЗУ и всегда одного размера — а свёрнутая панель
+    /// просто накрывается содержимым во весь рост. Собери мы это VStack'ом, «свернуть» означало бы
+    /// высоту 0 — то есть терминал на ноль строк и оборванную сборку.
+    @ViewBuilder
+    private func split(total: CGFloat) -> some View {
+        let open = model.isTerminalPanelOpen && model.isTerminalReady
+        let panelH = panelHeight(total: total)
+        let topH = open ? max(D.s(120), total - panelH - handleHeight) : total
+
+        ZStack(alignment: .top) {
+            // Терминал окна — смонтирован всегда, даже когда панель свёрнута.
+            if model.isTerminalReady {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    terminalView(model.shellTerminal)
+                        .frame(height: panelH)
+                }
+            }
+
+            VStack(spacing: 0) {
+                panes
+                    .frame(height: topH)
+                    .background(Theme.surface)   // непрозрачный: свёрнутый терминал под ним не виден
+                    .clipped()
+
+                if open {
+                    TerminalSplitHandle(fraction: $model.terminalPanelFraction, total: total)
+                        .frame(height: handleHeight)
+                    // Окно в панель: терминал нарисован под нами, клики уходят к нему.
+                    Color.clear
+                        .frame(height: panelH)
+                        .allowsHitTesting(false)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Высота терминала. Не даём ни ему, ни содержимому схлопнуться в полоску.
+    private func panelHeight(total: CGFloat) -> CGFloat {
+        let raw = total * model.terminalPanelFraction
+        return min(max(raw, D.s(80)), max(D.s(80), total - D.s(140)))
+    }
+
+    /// Содержимое вкладки: редактор или разговор с Claude.
+    @ViewBuilder
+    private var panes: some View {
+        ZStack {
+            editor
+                .opacity(model.pane == .file ? 1 : 0)
+                .allowsHitTesting(model.pane == .file)
+
+            if model.isTerminalReady {
+                terminals
+            }
+        }
     }
 
     private var editor: some View {
@@ -140,16 +196,6 @@ struct WorkspaceView: View {
             }
             .opacity(active ? 1 : 0)
             .allowsHitTesting(active)
-        }
-
-        // То же и с терминалами на сервере: свернуть вкладку — не значит убить ssh, в котором
-        // третий час идёт сборка.
-        ForEach(model.shells) { shell in
-            let active = model.pane == .remote(shell.id)
-
-            terminalView(shell.terminal)
-                .opacity(active ? 1 : 0)
-                .allowsHitTesting(active)
         }
     }
 
@@ -215,11 +261,30 @@ struct WorkspaceView: View {
             )
         }
 
+        /// Вкладка, чьи картинки показываем. Sheet берёт её по id, а не держит копию: вкладка
+        /// живёт своей жизнью (журнал дочитывается, заголовок меняется), и копия быстро протухла бы.
+        private var attachmentsTab: ClaudeTab? {
+            guard let id = model.attachmentsTabID else { return nil }
+            return model.claudeTabs.first { $0.id == id }
+        }
+
+        private var attachmentsBinding: Binding<Bool> {
+            Binding(
+                get: { attachmentsTab != nil },
+                set: { if !$0 { model.attachmentsTabID = nil } }
+            )
+        }
+
         func body(content: Content) -> some View {
             content
                 .sheet(isPresented: $model.isQuickOpenPresented) { QuickOpenView(model: model) }
                 .sheet(isPresented: $model.isSessionsPresented) { SessionsView(model: model) }
                 .sheet(isPresented: $model.isNewSessionPresented) { NewSessionView(model: model) }
+                .sheet(isPresented: attachmentsBinding) {
+                    if let tab = attachmentsTab {
+                        AttachmentsView(model: model, tab: tab)
+                    }
+                }
                 .alert("Ошибка", isPresented: errorBinding) {
                     Button("OK", role: .cancel) { model.errorMessage = nil }
                 } message: {
@@ -251,6 +316,28 @@ struct WorkspaceView: View {
             }
         }
 
+        // Название проекта — крупно и по центру окна, с его собственной иконкой.
+        //
+        // Штатный заголовок окна macOS рисует мелким и прижимает влево, где он теряется среди
+        // кнопок. А окон открыто несколько, и первый вопрос к любому из них — «это какой
+        // проект?». Центр — единственное место, где ответ виден, не приглядываясь.
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: D.s(8)) {
+                ProjectIconView(image: model.icon, isLocal: model.workspace.isLocal, size: D.s(18))
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(model.workspace.name)
+                        .font(.system(size: D.s(14), weight: .semibold))
+                        .lineLimit(1)
+                    Text(model.workspace.subtitle)
+                        .font(.system(size: D.s(10)))
+                        .foregroundStyle(Theme.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .help(model.workspace.subtitle)
+        }
+
         ToolbarItemGroup {
             if model.isBusy {
                 ProgressView().controlSize(.small)
@@ -266,21 +353,21 @@ struct WorkspaceView: View {
             }
             .help("Открыть ещё проект (⇧⌘O)")
 
-            // Терминал в проекте — рядом с плюсом, а не разделом в сайдбаре: открытые терминалы
-            // и так видны вкладками сверху, а колонке они нужны были только чтобы их создавать.
-            //
-            // У проекта на этом Mac это не «терминал на сервере», а шелл в его папке — сервера
-            // у него нет, и обещать его в подсказке нельзя (см. TerminalLaunch).
+            // Терминал теперь не вкладка, а панель под окном — кнопка её сворачивает и разворачивает.
+            // Подсвечена, когда панель открыта: видно, что она есть, даже когда свёрнута.
             Button {
-                model.openShell()
+                model.toggleTerminalPanel()
             } label: {
                 Image(systemName: "terminal")
                     .font(.system(size: D.s(14), weight: .medium))
+                    .foregroundStyle(model.isTerminalPanelOpen ? Theme.accent : Theme.secondary)
             }
             .disabled(!model.isTerminalReady)
-            .help(model.workspace.isLocal
-                  ? "Новый терминал в папке проекта (⌥⌘T)"
-                  : "Новый терминал на сервере (⌥⌘T)")
+            .help(model.isTerminalPanelOpen
+                  ? "Свернуть терминал (⌥⌘T). Он не закрывается — то, что в нём идёт, продолжит идти."
+                  : (model.workspace.isLocal
+                     ? "Показать терминал в папке проекта (⌥⌘T)"
+                     : "Показать терминал на сервере (⌥⌘T)"))
 
             Button {
                 Task { await model.refresh(force: true) }
@@ -300,6 +387,33 @@ struct WorkspaceView: View {
             }
             .disabled(model.localPath.isEmpty)
             .help("Сессии Claude по этому проекту (⇧⌘J)")
+        }
+    }
+}
+
+/// Иконка проекта: его собственный favicon, если он нашёлся в коде, иначе штатная.
+///
+/// Одна на список проектов и на заголовок окна — чтобы проект выглядел одинаково там и там.
+struct ProjectIconView: View {
+    let image: NSImage?
+    let isLocal: Bool
+    var size: CGFloat = 18
+
+    var body: some View {
+        if let image {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+                // Favicon'ы бывают квадратные и без скруглений — лёгкая маска роднит их
+                // с остальными иконками macOS.
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.22))
+        } else {
+            Image(systemName: isLocal ? "laptopcomputer" : "server.rack")
+                .font(.system(size: size * 0.8, weight: .medium))
+                .foregroundStyle(Theme.secondary)
+                .frame(width: size, height: size)
         }
     }
 }
@@ -411,6 +525,46 @@ struct WindowReader: NSViewRepresentable {
 
     func updateNSView(_ view: NSView, context: Context) {
         DispatchQueue.main.async { if let w = view.window { onWindow(w) } }
+    }
+}
+
+/// Перетаскиваемая граница между содержимым окна и терминалом под ним.
+///
+/// Тянется вверх и вниз, доля запоминается. Границы у доли есть (см. AppSettings): схлопнуть
+/// терминал в полоску можно только кнопкой — тогда это осознанное «свернуть», а не случайный
+/// промах мышью, после которого не понять, куда делся терминал.
+struct TerminalSplitHandle: View {
+    @Binding var fraction: Double
+    let total: CGFloat
+
+    @State private var startFraction: Double?
+    @State private var hovering = false
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Theme.border).frame(height: 1)
+            // Полоска-«ручка» под курсором: показывает, что за границу можно взяться.
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(hovering ? Theme.accent : .clear)
+                .frame(width: 36, height: 3)
+        }
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0; if $0 { NSCursor.resizeUpDown.set() } else { NSCursor.arrow.set() } }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { g in
+                    guard total > 0 else { return }
+                    let start = startFraction ?? fraction
+                    if startFraction == nil { startFraction = start }
+                    // Тянем вниз — терминал меньше, вверх — больше. Отсюда минус.
+                    let delta = -Double(g.translation.height) / Double(total)
+                    let range = AppSettings.terminalFractionRange
+                    fraction = min(max(start + delta, range.lowerBound), range.upperBound)
+                }
+                .onEnded { _ in startFraction = nil }
+        )
+        .animation(.none, value: fraction)
     }
 }
 

@@ -38,23 +38,9 @@ struct TabBar: View {
                         Divider().frame(height: 20)
                     }
 
-                    // Терминалы на сервере. Постоянной вкладки «Сервер» здесь больше нет:
-                    // терминал открывают из раздела Terminal, когда он нужен.
-                    ForEach(model.shells) { shell in
-                        LiveTab(
-                            title: shell.title,
-                            icon: "terminal",
-                            isBusy: false,
-                            isActive: model.pane == .remote(shell.id),
-                            closeHelp: "Закрыть терминал",
-                            onSelect: {
-                                model.pane = .remote(shell.id)
-                                model.terminal.focus(shell.terminal)
-                            },
-                            onClose: { model.closeShell(shell.id) }
-                        )
-                        Divider().frame(height: 20)
-                    }
+                    // Вкладок терминала здесь нет: терминал живёт панелью ПОД окном, а не рядом
+                    // с разговором. Вывод команды нужен одновременно с разговором и с diff'ом,
+                    // а не вместо них.
 
                     ForEach(model.tabs, id: \.absPath) { tab in
                         TabItem(
