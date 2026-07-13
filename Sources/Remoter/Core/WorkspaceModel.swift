@@ -344,14 +344,8 @@ final class WorkspaceModel: ObservableObject {
         startPolling()
         Task { await loadQuickOpenIndex() }
 
-        // Иконка проекта — его собственный favicon из кода. Ищем в фоне: список проектов покажет
-        // её при следующем открытии, а ради картинки задерживать открытие незачем.
-        Task { [conn, basePath, workspace] in
-            let root = repoRoot ?? basePath
-            if await ProjectIcon.discover(conn: conn, root: root, id: workspace.id) {
-                icon = ProjectIcon.cached(for: workspace.id)
-            }
-        }
+        // Иконку могли задать (или сменить) в настройках проекта, пока окно было закрыто.
+        icon = ProjectIcon.cached(for: workspace.id)
     }
 
     func stop() {

@@ -317,32 +317,31 @@ struct WorkspaceView: View {
             }
         }
 
-        // Название проекта — крупно и по центру окна, с его собственной иконкой.
+        // Название проекта — по центру окна, с его иконкой. Ничего больше: ни рамки, ни пути.
         //
-        // Штатный заголовок окна macOS рисует мелким и прижимает влево, где он теряется среди
-        // кнопок. А окон открыто несколько, и первый вопрос к любому из них — «это какой
-        // проект?». Центр — единственное место, где ответ виден, не приглядываясь.
-        ToolbarItem(placement: .principal) {
-            HStack(spacing: D.s(9)) {
-                ProjectIconView(image: model.icon, isLocal: model.workspace.isLocal, size: D.s(20))
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(model.workspace.name)
-                        .font(.system(size: D.s(14), weight: .semibold))
-                        .lineLimit(1)
-                    Text(model.workspace.subtitle)
-                        .font(.system(size: D.s(10)))
-                        .foregroundStyle(Theme.secondary)
-                        .lineLimit(1)
-                }
+        // Штатный заголовок macOS рисует мелким и прижимает влево, где он теряется среди кнопок.
+        // А окон открыто несколько, и первый вопрос к любому из них — «это какой проект?».
+        // Ответ на него — имя и картинка; сервер и путь на этот вопрос не отвечают, а шум создают
+        // (они и так есть в подсказке и в списке проектов).
+        // Своей подложки у заголовка нет. Ту «капсулу», что была вокруг него, рисует сама macOS:
+        // в новых версиях элементы тулбара живут в общем стеклянном контейнере (те же капсулы —
+        // и вокруг кнопок справа). Прячем её штатно; на старых системах такого API нет, и там
+        // заголовок остаётся с системным фоном — это не повод не собраться.
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .principal) {
+                ProjectTitle(name: model.workspace.name,
+                             icon: model.icon,
+                             isLocal: model.workspace.isLocal,
+                             subtitle: model.workspace.subtitle)
             }
-            // Плашка дышит: без отступов название липло к иконке и к краям, и заголовок читался
-            // как случайно втиснутый в щель между кнопками.
-            .padding(.horizontal, D.s(14))
-            .padding(.vertical, D.s(5))
-            .background(Theme.hover, in: RoundedRectangle(cornerRadius: D.s(8)))
-            .padding(.horizontal, D.s(8))
-            .help(model.workspace.subtitle)
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .principal) {
+                ProjectTitle(name: model.workspace.name,
+                             icon: model.icon,
+                             isLocal: model.workspace.isLocal,
+                             subtitle: model.workspace.subtitle)
+            }
         }
 
         ToolbarItemGroup {
@@ -398,7 +397,31 @@ struct WorkspaceView: View {
     }
 }
 
-/// Иконка проекта: его собственный favicon, если он нашёлся в коде, иначе штатная.
+/// Название проекта по центру заголовка окна — только имя и иконка.
+///
+/// Своей подложки мы не рисуем. Ту «капсулу», что была видна вокруг заголовка, рисует сама macOS:
+/// в новых версиях элементы тулбара живут в общем стеклянном контейнере (те же капсулы видны и
+/// вокруг кнопок справа). Прячем её штатно — `sharedBackgroundVisibility(.hidden)`; на системах,
+/// где такого API нет, заголовок просто останется с системной подложкой, и это не повод не собраться.
+struct ProjectTitle: View {
+    let name: String
+    let icon: NSImage?
+    let isLocal: Bool
+    let subtitle: String
+
+    var body: some View {
+        HStack(spacing: D.s(8)) {
+            ProjectIconView(image: icon, isLocal: isLocal, size: D.s(20))
+
+            Text(name)
+                .font(.system(size: D.s(14), weight: .semibold))
+                .lineLimit(1)
+        }
+        .help(subtitle)   // сервер и путь — в подсказке: в заголовке они только шумят
+    }
+}
+
+/// Иконка проекта: та, что вы ему задали (файлом или favicon сайта), иначе штатная.
 ///
 /// Одна на список проектов и на заголовок окна — чтобы проект выглядел одинаково там и там.
 struct ProjectIconView: View {

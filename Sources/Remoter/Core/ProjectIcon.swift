@@ -1,21 +1,23 @@
 import AppKit
 
-/// Иконка проекта — его собственный favicon, найденный прямо в коде.
+/// Иконка проекта — та, что вы задали ему сами.
 ///
-/// Проектов в списке десяток, и все они выглядят одинаково: одна и та же серая папка. А у сайта,
-/// над которым идёт работа, иконка обычно есть — и она узнаётся мгновенно, без чтения названия.
+/// Проектов в списке десяток, и все они выглядят одинаково: одна и та же серая коробка. Своя
+/// иконка узнаётся мгновенно, не читая названия.
 ///
-/// Ищем и на сервере, и локально ОДИНАКОВО — через `Connection.sh`, как и всё остальное. Но
-/// у списка проектов соединения нет и быть не должно (открывать ssh ко всем серверам, чтобы
-/// нарисовать список, — безумие), поэтому иконка ищется при ОТКРЫТИИ проекта и кладётся в кэш.
-/// Список берёт её оттуда: в первый раз проект показывается со штатной иконкой, дальше — со своей.
+/// Ищем её не мы, а **вы**: картинкой с диска или адресом сайта, у которого мы заберём favicon.
+/// Автоматический поиск по коду проекта здесь был и убран — он лазил по чужому дереву, находил
+/// то иконку примера, то логотип библиотеки, и объяснить, почему у проекта именно такая картинка,
+/// было невозможно. Явный выбор честнее любой догадки.
+///
+/// Живут иконки в Application Support, по файлу на проект. В самом проекте ничего не появляется.
 @MainActor
 enum ProjectIcon {
 
-    /// Больше мегабайта favicon не бывает; всё, что больше, — не иконка, а чья-то ошибка.
-    private static let maxBytes = 1_048_576
+    /// Иконка больше мегабайта — это не иконка, а чья-то ошибка.
+    static let maxBytes = 1_048_576
 
-    // MARK: - Кэш
+    // MARK: - Хранилище
 
     private static var cacheDir: URL {
         let dir = TestIsolation.path("icons") {
@@ -28,104 +30,146 @@ enum ProjectIcon {
         return dir
     }
 
-    private static func cacheFile(_ id: UUID) -> URL {
+    private static func file(_ id: UUID) -> URL {
         cacheDir.appendingPathComponent(id.uuidString)
     }
 
-    /// Иконка проекта, если её уже нашли раньше. Декодируем каждый раз заново, а не держим в
-    /// памяти: иконок мало, они крошечные, а вот протухший кэш в памяти — источник странностей.
     static func cached(for id: UUID) -> NSImage? {
-        guard let data = try? Data(contentsOf: cacheFile(id)) else { return nil }
+        guard let data = try? Data(contentsOf: file(id)) else { return nil }
         return NSImage(data: data)
     }
 
-    /// Проект удалили — незачем держать его иконку вечно.
-    static func forget(_ id: UUID) {
-        try? FileManager.default.removeItem(at: cacheFile(id))
-    }
-
-    // MARK: - Поиск
-
-    /// Находит favicon в проекте и кладёт в кэш. Тихая операция: не нашли — ну и ладно,
-    /// останется штатная иконка. Ошибки сюда не поднимаются: из-за ненайденной картинки
-    /// проект открываться не перестанет.
+    /// Кладём картинку проекту. Возвращает nil, если это не картинка, — молча положить в кэш
+    /// то, что потом не нарисуется, было бы худшим исходом: иконки нет, а почему — непонятно.
     @discardableResult
-    static func discover(conn: Connection, root: String, id: UUID) async -> Bool {
-        guard let path = await find(conn: conn, root: root) else { return false }
-        guard let data = await read(conn: conn, path: path), NSImage(data: data) != nil else {
-            return false
+    static func store(_ data: Data, for id: UUID) -> NSImage? {
+        guard data.count <= maxBytes, let image = NSImage(data: data) else { return nil }
+        try? data.write(to: file(id), options: .atomic)
+        return image
+    }
+
+    static func forget(_ id: UUID) {
+        try? FileManager.default.removeItem(at: file(id))
+    }
+
+    // MARK: - Иконка с сайта
+
+    enum FetchError: LocalizedError {
+        case badAddress
+        case notFound
+        case notAnImage
+
+        var errorDescription: String? {
+            switch self {
+            case .badAddress: return "Не разобрал адрес сайта."
+            case .notFound:   return "На сайте не нашлось иконки."
+            case .notAnImage: return "По этому адресу лежит не картинка."
+            }
         }
-        try? data.write(to: cacheFile(id), options: .atomic)
-        return true
     }
 
-    /// Где обычно лежит favicon. Сначала пара очевидных мест (это дёшево — один `test -f`
-    /// на каждое), и только потом поиск по дереву.
-    ///
-    /// SVG сюда не берём: NSImage их не декодирует, и мы бы бережно положили в кэш то, что потом
-    /// не нарисуется.
-    private static let candidates = [
-        "favicon.ico", "favicon.png",
-        "public/favicon.ico", "public/favicon.png",
-        "static/favicon.ico", "static/favicon.png",
-    ]
+    /// Забирает favicon у сайта: читает его страницу, находит объявленную иконку, а если её
+    /// нет — пробует `/favicon.ico`, как это делает любой браузер.
+    static func fetch(fromSite address: String) async throws -> Data {
+        guard let home = url(from: address) else { throw FetchError.badAddress }
 
-    /// Каталоги, в которые лезть незачем: там лежат favicon'ы чужих библиотек, и первый
-    /// попавшийся был бы не наш.
-    private static let skipDirs = [
-        "node_modules", ".git", "vendor", "dist", "build", "target", "Pods",
-        ".venv", "venv", "__pycache__", ".next", ".nuxt", "coverage", ".build",
-    ]
+        var candidates = (try? await declaredIcons(at: home)) ?? []
+        // Ничего не объявлено — там, где браузер ищет по умолчанию.
+        candidates.append(contentsOf: [
+            home.appendingPathComponent("favicon.ico"),
+            home.appendingPathComponent("favicon.png"),
+            home.appendingPathComponent("apple-touch-icon.png"),
+        ])
 
-    /// Имена, которые считаем иконкой проекта, — в порядке убывания доверия.
-    private static let patterns = [
-        "favicon.ico", "favicon.png", "apple-touch-icon*.png", "icon.png", "logo.png",
-    ]
-
-    private static func find(conn: Connection, root: String) async -> String? {
-        // Один скрипт на весь перебор: отдельная ssh-команда на каждую проверку — это отдельная
-        // круговая задержка на каждую, а так укладываемся в одну.
-        let checks = candidates
-            .map { "[ -f \(shq(root + "/" + $0)) ] && { printf '%s' \(shq(root + "/" + $0)); exit 0; }" }
-            .joined(separator: "\n")
-
-        let prune = skipDirs.map { "-name \(shq($0))" }.joined(separator: " -o ")
-        let names = patterns.map { "-iname \(shq($0))" }.joined(separator: " -o ")
-
-        // Ищем ГЛУБОКО, а не только в корне: в живых проектах favicon лежит где угодно —
-        // `src/main/resources/static/`, `app/assets/images/`, `web/public/`. Раньше поиск
-        // упирался в три уровня, и у половины проектов иконка просто не находилась.
-        //
-        // Из найденного берём самый мелкий по вложенности (иконка проекта лежит ближе к корню,
-        // чем иконка какого-нибудь примера внутри него), а среди равных — по порядку в patterns.
-        let script = """
-        \(checks)
-
-        list=$(find \(shq(root)) -maxdepth 7 \\
-          \\( \(prune) \\) -prune -o \\
-          -type f \\( \(names) \\) -print 2>/dev/null \\
-          | awk -F/ '{print NF"\\t"$0}' | sort -n | cut -f2-)
-        [ -n "$list" ] || exit 1
-
-        for p in \(patterns.map(shq).joined(separator: " ")); do
-          # шаблон имени -> шаблон конца пути
-          m=$(printf '%s\\n' "$list" | grep -i -m1 -- "/$(printf '%s' "$p" | sed 's/[.]/[.]/g; s/[*]/.*/g')$")
-          [ -n "$m" ] && { printf '%s' "$m"; exit 0; }
-        done
-        exit 1
-        """
-
-        guard let r = try? await conn.sh(script, timeout: 30), r.ok else { return nil }
-        let path = r.line
-        return path.isEmpty ? nil : path
+        for candidate in candidates {
+            guard let data = try? await load(candidate), data.count <= maxBytes else { continue }
+            guard NSImage(data: data) != nil else { continue }
+            return data
+        }
+        throw FetchError.notFound
     }
 
-    private static func read(conn: Connection, path: String) async -> Data? {
-        // Читаем ограниченно: `head -c` не даст втянуть в память чужой многомегабайтный файл,
-        // если под именем favicon.png вдруг лежит не иконка.
-        guard let r = try? await conn.sh("head -c \(maxBytes) < \(shq(path))", timeout: 20),
-              r.ok, !r.out.isEmpty
+    /// Адрес, набранный человеком: «onco-sos.ru», «https://onco-sos.ru/страница». Нам нужен корень.
+    static func url(from address: String) -> URL? {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let withScheme = trimmed.contains("://") ? trimmed : "https://" + trimmed
+        guard var parts = URLComponents(string: withScheme),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              parts.host?.isEmpty == false
         else { return nil }
-        return r.out
+
+        parts.path = ""
+        parts.query = nil
+        parts.fragment = nil
+        return parts.url
+    }
+
+    /// Иконки, объявленные самой страницей (`<link rel="icon" href="…">`), — они точнее, чем
+    /// угаданный `/favicon.ico`, и там же лежат крупные apple-touch-icon.
+    ///
+    /// Разбор нарочно нетребовательный: HTML в жизни бывает любой, и падать из-за картинки
+    /// приложение не должно — не разобрали, значит просто пойдём по умолчанию.
+    private static func declaredIcons(at home: URL) async throws -> [URL] {
+        declaredIcons(in: String(decoding: try await load(home), as: UTF8.self), home: home)
+    }
+
+    /// Отдельно от загрузки — чтобы разбор HTML проверялся тестом, а не «на живом сайте»,
+    /// который завтра поменяет вёрстку.
+    static func declaredIcons(in html: String, home: URL) -> [URL] {
+        // <link rel="icon" ... href="...">  и  <link href="..." ... rel="apple-touch-icon">
+        let pattern = #"<link\b[^>]*>"#
+        guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return []
+        }
+        let range = NSRange(html.startIndex..., in: html)
+
+        var found: [(rank: Int, url: URL)] = []
+        for match in re.matches(in: html, range: range) {
+            guard let r = Range(match.range, in: html) else { continue }
+            let tag = String(html[r])
+            guard let rel = attribute("rel", in: tag)?.lowercased(),
+                  rel.contains("icon"),
+                  let href = attribute("href", in: tag),
+                  let url = URL(string: href, relativeTo: home)?.absoluteURL
+            else { continue }
+
+            // Крупные — вперёд: в списке проектов иконка рисуется не в 16 точек.
+            let rank = rel.contains("apple-touch") ? 0 : (size(in: tag) >= 32 ? 1 : 2)
+            found.append((rank, url))
+        }
+        return found.sorted { $0.rank < $1.rank }.map(\.url)
+    }
+
+    private static func attribute(_ name: String, in tag: String) -> String? {
+        let pattern = "\(name)\\s*=\\s*[\"']([^\"']+)[\"']"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let m = re.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag)),
+              let r = Range(m.range(at: 1), in: tag)
+        else { return nil }
+        return String(tag[r]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// `sizes="32x32"` → 32. Нет — 0.
+    private static func size(in tag: String) -> Int {
+        guard let sizes = attribute("sizes", in: tag),
+              let first = sizes.split(separator: "x").first,
+              let n = Int(first)
+        else { return 0 }
+        return n
+    }
+
+    private static func load(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        // Некоторые сайты без «человеческого» агента отдают заглушку вместо страницы.
+        request.setValue("Mozilla/5.0 (Macintosh) Remoter", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw FetchError.notFound
+        }
+        return data
     }
 }

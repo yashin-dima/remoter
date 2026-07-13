@@ -337,6 +337,15 @@ struct WorkspaceEditor: View {
     @State private var checkOK = false
     @State private var browsing = false
 
+    // Иконка проекта. Держим её в форме и записываем только при сохранении: передумали и нажали
+    // «Отмена» — на диске ничего не поменялось.
+    @State private var iconImage: NSImage?
+    @State private var iconData: Data?
+    @State private var iconChanged = false
+    @State private var site = ""
+    @State private var fetchingIcon = false
+    @State private var iconError: String?
+
     /// Путь, как его набрали, — но с раскрытой тильдой: `~/Projects/app` набирают по привычке,
     /// а на диске такой папки нет, есть `/Users/…/Projects/app`. Раскрываем только у локального:
     /// на сервере `~` означает домашний каталог ТАМ, и подставлять в него свой было бы враньём
@@ -454,6 +463,7 @@ struct WorkspaceEditor: View {
             Form {
                 TextField("Название", text: $workspace.name, prompt: Text("Мой проект"))
                 company
+                icon
                 kindPicker
                 // Поля у двух видов проекта разные вплоть до последнего: у папки на Mac нет ни
                 // хоста, ни порта, ни опций ssh — показывать их «серыми» значило бы намекать,
@@ -463,6 +473,7 @@ struct WorkspaceEditor: View {
             }
             .formStyle(.grouped)
             .textFieldStyle(.roundedBorder)
+            .onAppear { iconImage = ProjectIcon.cached(for: workspace.id) }
 
             Text(hint)
                 .font(.caption)
@@ -531,6 +542,89 @@ struct WorkspaceEditor: View {
         if isNewCompany {
             TextField("Название компании", text: companyText,
                       prompt: Text("например, Acme"))
+        }
+    }
+
+    /// Иконка проекта: картинкой с диска или адресом сайта, у которого мы заберём favicon.
+    ///
+    /// Искать её по коду проекта приложение больше не пытается — оно находило то иконку примера,
+    /// то логотип библиотеки, и объяснить, почему картинка именно такая, было нельзя.
+    @ViewBuilder
+    private var icon: some View {
+        LabeledContent("Иконка") {
+            HStack(spacing: 10) {
+                ProjectIconView(image: iconImage, isLocal: workspace.isLocal, size: D.s(28))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Button("Выбрать файл…", action: pickIconFile)
+
+                        if iconImage != nil {
+                            Button("Убрать") {
+                                iconImage = nil
+                                iconData = nil
+                                iconChanged = true
+                                iconError = nil
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("Сайт", text: $site, prompt: Text("onco-sos.ru — возьму favicon"))
+                            .onSubmit { Task { await fetchIcon() } }
+                        Button("Взять") { Task { await fetchIcon() } }
+                            .disabled(site.trimmingCharacters(in: .whitespaces).isEmpty || fetchingIcon)
+                        if fetchingIcon { ProgressView().controlSize(.small) }
+                    }
+
+                    if let iconError {
+                        Text(iconError)
+                            .font(.caption)
+                            .foregroundStyle(Theme.modified)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pickIconFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.canChooseDirectories = false
+        panel.prompt = "Выбрать"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        guard let data = try? Data(contentsOf: url), data.count <= ProjectIcon.maxBytes,
+              let image = NSImage(data: data)
+        else {
+            iconError = "Не смог прочитать картинку (или она больше мегабайта)."
+            return
+        }
+        iconImage = image
+        iconData = data
+        iconChanged = true
+        iconError = nil
+    }
+
+    private func fetchIcon() async {
+        let address = site.trimmingCharacters(in: .whitespaces)
+        guard !address.isEmpty, !fetchingIcon else { return }
+
+        fetchingIcon = true
+        iconError = nil
+        defer { fetchingIcon = false }
+
+        do {
+            let data = try await ProjectIcon.fetch(fromSite: address)
+            guard let image = NSImage(data: data) else {
+                iconError = ProjectIcon.FetchError.notAnImage.localizedDescription
+                return
+            }
+            iconImage = image
+            iconData = data
+            iconChanged = true
+        } catch {
+            iconError = error.localizedDescription
         }
     }
 
@@ -628,6 +722,16 @@ struct WorkspaceEditor: View {
     private func save() {
         workspace.path = trimmedPath
         nameFromFolder(workspace.path)
+
+        // Иконку пишем только здесь: нажали «Отмена» — на диске ничего не изменилось.
+        if iconChanged {
+            if let iconData {
+                ProjectIcon.store(iconData, for: workspace.id)
+            } else {
+                ProjectIcon.forget(workspace.id)
+            }
+        }
+
         onSave(workspace)
         dismiss()
     }
