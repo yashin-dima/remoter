@@ -8,6 +8,9 @@ struct RemotePathPicker: View {
     let host: String
     let port: Int?
     let extraArgs: [String]
+    /// Пароль, набранный в форме проекта: обзор открывают ДО сохранения, и в связке ключей
+    /// пароля ещё нет. Пусто — соединение возьмёт сохранённый, если он есть.
+    var password: String?
     let onPick: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -146,7 +149,7 @@ struct RemotePathPicker: View {
     // MARK: -
 
     private func start() async {
-        let c = SSHConnection(host: host, port: port, extraArgs: extraArgs)
+        let c = SSHConnection(host: host, port: port, extraArgs: extraArgs, password: password)
         // Сохранить ДО connect(): закрыли окно, пока подключение шло, — onDisappear всё равно
         // должен его разорвать. Иначе установившийся ssh-канал повисал бы сиротой до выхода
         // из приложения.

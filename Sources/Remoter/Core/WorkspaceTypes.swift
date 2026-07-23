@@ -5,7 +5,8 @@ import Foundation
 
 /// Что сейчас открыто в редакторе.
 struct OpenDoc: Equatable {
-    enum Mode: Equatable { case view, diff }
+    /// `.image` — просмотр картинки: Monaco в этой вкладке не участвует вовсе.
+    enum Mode: Equatable { case view, diff, image }
 
     var mode: Mode
     var title: String
@@ -32,6 +33,10 @@ struct OpenDoc: Equatable {
     var readOnlyReason: String?
     /// Файл лежит на Mac, а не на сервере: сохраняется на диск, поллингом не трогается.
     var isLocal: Bool = false
+
+    /// Байты картинки — только у вкладки `.image`. Картинки открываются на просмотр,
+    /// а не «бинарный файл, показать нечего»: скриншоты и ассеты — обычные жители репозитория.
+    var imageData: Data?
 
     /// Вкладка-предпросмотр: открыта одним кликом и будет заменена следующим таким же.
     ///

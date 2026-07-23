@@ -146,6 +146,10 @@ extension WorkspaceModel {
         case .view:
             monaco.showFile(title: tab.title, path: tab.absPath,
                             content: tab.baseline, editable: tab.editable)
+        case .image:
+            // Картинку рисует ImageViewer поверх редактора (см. EditorPane) — Monaco
+            // в этой вкладке не участвует.
+            break
         }
     }
 }

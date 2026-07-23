@@ -28,6 +28,13 @@ extension WorkspaceModel {
         let rel = relPath(absPath)
         let name = (absPath as NSString).lastPathComponent
 
+        // Картинка открывается просмотром, а не «бинарный файл, показать нечего»: скриншоты
+        // и ассеты — обычные жители репозитория, и смотреть на них надо здесь же.
+        if MediaKind(path: absPath) == .image {
+            await openImage(absPath, rel: rel, kind: nil, preview: preview, generation: gen)
+            return
+        }
+
         // Файл в списке изменений — открываем сразу как diff, это же основной сценарий.
         if let rel, let change = status.changes.first(where: { $0.path == rel }) {
             await openDiff(change, preview: preview)
@@ -64,6 +71,23 @@ extension WorkspaceModel {
         }
     }
 
+    /// Картинка — вкладкой просмотра. `kind` не пустой у изменённой в git: бейдж статуса
+    /// остаётся на вкладке, хотя diff двух картинок мы не рисуем — показываем текущую.
+    private func openImage(_ absPath: String, rel: String?, kind: ChangeKind?,
+                           preview: Bool, generation gen: Int) async {
+        let name = (absPath as NSString).lastPathComponent
+        do {
+            let data = try await RemoteFS.download(conn: conn, path: absPath)
+            guard gen == openGeneration else { return }
+            present(OpenDoc(mode: .image, title: name, absPath: absPath, relPath: rel,
+                            kind: kind, imageData: data, isPreview: preview))
+            pane = .file
+        } catch {
+            guard gen == openGeneration else { return }
+            errorMessage = "Не удалось открыть \(name): \(error.localizedDescription)"
+        }
+    }
+
     func openChange(_ change: GitChange, preview: Bool = false) async {
         guard let root = repoRoot else { return }
         let preview = preview && AppSettings.shared.previewTabs
@@ -96,6 +120,18 @@ extension WorkspaceModel {
 
         let absPath = root + "/" + change.path
         let name = change.name
+
+        // Изменённая картинка: diff двух картинок мы не рисуем, но и «бинарный файл, показать
+        // нечего» — не ответ. Показываем ту, что есть: рабочую, а у удалённой — версию из HEAD.
+        if MediaKind(path: absPath) == .image {
+            if change.isDeletedInWorktree {
+                await openImageFromGit(change, root: root, preview: preview, generation: gen)
+            } else {
+                await openImage(absPath, rel: change.path, kind: change.kind,
+                                preview: preview, generation: gen)
+            }
+            return
+        }
 
         async let originalSide: String? = loadOriginal(change)
         async let currentFile: RemoteFile = loadWorktree(change, absPath: absPath)
@@ -136,6 +172,28 @@ extension WorkspaceModel {
             monaco.showMessage("\(name) — слишком большой для diff (\(byteString(bytes)))")
         case .missing:
             monaco.showMessage("\(name) — не удалось прочитать")
+        }
+    }
+
+    /// Удалённая картинка: рабочей копии больше нет, показываем последнюю версию из git.
+    private func openImageFromGit(_ change: GitChange, root: String,
+                                  preview: Bool, generation gen: Int) async {
+        let absPath = root + "/" + change.path
+        do {
+            guard let data = try await Git.show(
+                conn: conn, root: root, rev: diffBase.rev, path: change.origPath ?? change.path
+            ) else {
+                errorMessage = "\(change.name): в \(diffBase.title) этой картинки нет"
+                return
+            }
+            guard gen == openGeneration else { return }
+            present(OpenDoc(mode: .image, title: change.name, absPath: absPath,
+                            relPath: change.path, kind: change.kind,
+                            imageData: data, isPreview: preview))
+            pane = .file
+        } catch {
+            guard gen == openGeneration else { return }
+            errorMessage = error.localizedDescription
         }
     }
 

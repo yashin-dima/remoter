@@ -39,6 +39,13 @@ final class SSHConnection: Connection {
     let port: Int?
     /// Дополнительные аргументы ssh из настроек воркспейса (свой ключ, бастион и т.п.).
     let extraArgs: [String]
+
+    /// Пароль в обход Keychain — для формы проекта.
+    ///
+    /// «Проверить подключение» и «Обзор…» поднимают ssh ещё до того, как проект сохранён: пароль
+    /// в этот момент только набран в поле и в связке ключей его нет. Без этого параметра форма
+    /// спрашивала бы пароль диалогом ровно там, где человек его секунду назад ввёл.
+    private let explicitPassword: String?
     private let socketPath: String
     private var master: Process?
     private var connectTask: Task<Void, Never>?
@@ -52,10 +59,12 @@ final class SSHConnection: Connection {
     /// на одном канале. Пока оба открыты — не беда, но `disconnect()` удаляет файл сокета: стоило
     /// закрыть одно окно (или просто нажать «Проверить подключение» в настройках), как второе
     /// теряло связь на ровном месте. Проекты должны быть независимы — значит, и каналы тоже.
-    init(host: String, port: Int? = nil, extraArgs: [String] = [], key: String = UUID().uuidString) {
+    init(host: String, port: Int? = nil, extraArgs: [String] = [], password: String? = nil,
+         key: String = UUID().uuidString) {
         self.host = host
         self.port = port
         self.extraArgs = extraArgs
+        self.explicitPassword = password
         self.socketPath = Self.socketPath(for: host, port: port, key: key)
         super.init()
         // Заодно выкидываем боксы умерших соединений: иначе массив рос бы весь срок жизни
@@ -138,9 +147,23 @@ final class SSHConnection: Connection {
         .ssh(socket: socketPath, host: host, args: connectArgs)
     }
 
+    /// Пароль сервера — если он вообще есть.
+    ///
+    /// Набранный в форме важнее сохранённого: его туда только что и ввели, потому что старый
+    /// перестал подходить. Keychain читаем на каждое подключение, а не кэшируем в поле: пароль
+    /// могли поменять в настройках соседнего проекта на тот же сервер, пока это соединение висело.
+    private var savedPassword: String? {
+        if let p = explicitPassword, !p.isEmpty { return p }
+        return Keychain.password(host: host, port: port)
+    }
+
+    /// Отметка «сохранённый пароль уже отдавали в этом подключении». Лежит рядом с сокетом,
+    /// секрета не содержит — только факт. Зачем она, объяснено в askpass.sh.
+    private var passwordUsedFlag: String { socketPath + ".pw-used" }
+
     private var askpassEnv: [String: String] {
         guard let script = Bundle.main.path(forResource: "askpass", ofType: "sh") else { return [:] }
-        return [
+        var env = [
             "SSH_ASKPASS": script,
             // force — иначе ssh проигнорирует askpass, решив, что можно спросить в консоли.
             "SSH_ASKPASS_REQUIRE": "force",
@@ -148,6 +171,14 @@ final class SSHConnection: Connection {
             // отказываются звать askpass вовсе. Сам дисплей никогда не открывается.
             "DISPLAY": ":0",
         ]
+        // Пароль отдаём хелперу ОКРУЖЕНИЕМ, а не аргументом: argv виден в `ps` любому процессу
+        // в системе, окружение — нет. Достаётся оно только самому ssh и его потомкам, то есть
+        // askpass-хелперу, которому и предназначено.
+        if let pw = savedPassword {
+            env["REMOTER_PASSWORD"] = pw
+            env["REMOTER_PASSWORD_USED"] = passwordUsedFlag
+        }
+        return env
     }
 
     // MARK: - Жизненный цикл
@@ -177,6 +208,9 @@ final class SSHConnection: Connection {
             return
         }
         try? FileManager.default.removeItem(atPath: socketPath)
+        // Новая попытка — новый шанс сохранённому паролю. Иначе отметка от прошлого подключения
+        // означала бы «уже пробовали», и ssh сразу спрашивал бы человека.
+        try? FileManager.default.removeItem(atPath: passwordUsedFlag)
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -301,6 +335,7 @@ final class SSHConnection: Connection {
         }
         tearDownMaster()
         try? FileManager.default.removeItem(atPath: socketPath)
+        try? FileManager.default.removeItem(atPath: passwordUsedFlag)
         state = .idle
     }
 

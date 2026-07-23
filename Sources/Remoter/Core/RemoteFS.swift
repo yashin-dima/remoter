@@ -267,6 +267,47 @@ enum RemoteFS {
         return r?.ok ?? false
     }
 
+    // MARK: - Скачивание
+
+    /// Потолок скачивания. Не лимит редактора (тому 4 МБ хватает), а предохранитель здравого
+    /// смысла: гигабайтный дамп тянуть в память нельзя, и молча резать его — тоже.
+    static let maxDownloadSize = 512 * 1024 * 1024
+
+    enum DownloadError: LocalizedError {
+        case tooLarge(Int)
+        case unreadable
+
+        var errorDescription: String? {
+            switch self {
+            case .tooLarge(let bytes):
+                return "Файл слишком большой для скачивания (\(byteString(bytes)))."
+            case .unreadable:
+                return "Не удалось прочитать файл."
+            }
+        }
+    }
+
+    /// Скачивает файл целиком — байты как есть, без текстовых лимитов редактора.
+    ///
+    /// Сначала размер: и чтобы отказаться от гигантского файла ДО перекачки, и чтобы сверить
+    /// в конце, что доехало всё. Обрыв ssh посреди `cat` завершается успешно — EOF неотличим
+    /// от конца файла, и без сверки на диск молча лёг бы обрубок.
+    static func download(conn: Connection, path: String) async throws -> Data {
+        let sizeR = try await conn.sh("wc -c < \(shq(path)) 2>/dev/null")
+        try Connection.transportCheck(sizeR)
+        guard sizeR.ok, let size = Int(sizeR.line) else { throw DownloadError.unreadable }
+        guard size <= maxDownloadSize else { throw DownloadError.tooLarge(size) }
+
+        // Таймаут по размеру — как у записи: большой файл на медленном канале не должен
+        // обрываться сторожем ровно на середине.
+        let timeout = writeTimeoutBase + Double(size) / writeMinBytesPerSecond
+        let r = try await conn.sh("cat < \(shq(path))", timeout: timeout)
+        try Connection.transportCheck(r)
+        guard r.ok else { throw DownloadError.unreadable }
+        guard r.out.count == size else { throw DownloadError.unreadable }
+        return r.out
+    }
+
     // MARK: - Операции над файлами
     //
     // Все они разрушающие, поэтому одинаково устроены: пустые пути отсекаются раньше shell'а,

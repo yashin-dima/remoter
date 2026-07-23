@@ -201,6 +201,90 @@ extension WorkspaceModel {
 
     /// Кладёт файлы с Mac в каталог на сервере.
     ///
+    // MARK: - Скачивание
+
+    /// Скачивает файлы с сервера на Mac. Один файл — «Сохранить как…», несколько — выбор папки.
+    ///
+    /// Скачивается выделение, если файл в нём, — так же, как работают остальные операции дерева.
+    func download(_ target: String?) async {
+        let paths = targets(target).filter { path in
+            // Папки не скачиваем (это уже архивация, отдельная история) — молча пропускать
+            // их нельзя, человек решит, что скачалось всё.
+            if rows.first(where: { $0.entry.path == path })?.entry.isDir == true {
+                toast(.error, "«\((path as NSString).lastPathComponent)» — папка, скачиваю только файлы")
+                return false
+            }
+            return true
+        }
+        guard !paths.isEmpty else { return }
+
+        if paths.count == 1, let path = paths.first {
+            await downloadOne(path)
+        } else {
+            await downloadMany(paths)
+        }
+    }
+
+    private func downloadOne(_ path: String) async {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = (path as NSString).lastPathComponent
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        beginBusy()
+        defer { endBusy() }
+        do {
+            let data = try await RemoteFS.download(conn: conn, path: path)
+            try data.write(to: dest, options: .atomic)
+            toast(.success, "Скачано: \(dest.lastPathComponent)")
+        } catch {
+            toast(.error, "Не удалось скачать: \(error.localizedDescription)")
+        }
+    }
+
+    private func downloadMany(_ paths: [String]) async {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Скачать сюда"
+        guard panel.runModal() == .OK, let dir = panel.url else { return }
+
+        beginBusy()
+        defer { endBusy() }
+
+        var saved = 0
+        for path in paths {
+            do {
+                let data = try await RemoteFS.download(conn: conn, path: path)
+                // Одноимённый файл в приёмнике не затирается — рядом ляжет « 2», как при загрузке.
+                let dest = freeLocalName(in: dir, name: (path as NSString).lastPathComponent)
+                try data.write(to: dest, options: .atomic)
+                saved += 1
+            } catch {
+                toast(.error, "«\((path as NSString).lastPathComponent)»: \(error.localizedDescription)")
+            }
+        }
+        if saved > 0 { toast(.success, "Скачано файлов: \(saved)") }
+    }
+
+    /// Свободное имя в локальной папке: «лог.txt» → «лог 2.txt», если занято.
+    /// Не private: им же пользуется перетаскивание в панель Local (+LocalPanel).
+    func freeLocalName(in dir: URL, name: String) -> URL {
+        let fm = FileManager.default
+        var candidate = dir.appendingPathComponent(name)
+        guard fm.fileExists(atPath: candidate.path) else { return candidate }
+
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
+        for i in 2...999 {
+            let next = ext.isEmpty ? "\(base) \(i)" : "\(base) \(i).\(ext)"
+            candidate = dir.appendingPathComponent(next)
+            if !fm.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return dir.appendingPathComponent("\(base) \(UUID().uuidString.prefix(8)).\(ext)")
+    }
+
     /// Одноимённый файл не затирается: рядом появится «логотип 2.png». Перетаскивание — жест
     /// беглый, и молча потерять чужой файл из-за совпадения имени было бы отвратительно.
     func upload(urls: [URL], to dir: String) async {

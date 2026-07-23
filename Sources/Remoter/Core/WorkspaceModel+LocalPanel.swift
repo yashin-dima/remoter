@@ -31,6 +31,34 @@ extension WorkspaceModel {
         localRows = localTree.rows(from: localPath)
     }
 
+    /// Кладёт файлы в локальную папку проекта — так работает перетаскивание в панель Local.
+    ///
+    /// Копирование, а не перенос: файл с рабочего стола должен остаться на рабочем столе.
+    /// Одноимённый не затирается — рядом ляжет « 2», как и везде в приложении.
+    func importLocal(urls: [URL], into dir: String? = nil) {
+        guard !localPath.isEmpty else { return }
+        let fm = FileManager.default
+        let target = dir ?? localPath
+
+        var copied = 0
+        for url in urls {
+            guard fm.fileExists(atPath: url.path) else { continue }
+            do {
+                let dest = freeLocalName(
+                    in: URL(fileURLWithPath: target, isDirectory: true),
+                    name: url.lastPathComponent)
+                try fm.copyItem(at: url, to: dest)
+                copied += 1
+            } catch {
+                toast(.error, "«\(url.lastPathComponent)»: \(error.localizedDescription)")
+            }
+        }
+        if copied > 0 {
+            toast(.success, copied == 1 ? "Добавлен файл" : "Добавлено файлов: \(copied)")
+            reloadLocalTree()
+        }
+    }
+
     func openLocalFile(_ path: String, preview: Bool = false) {
         let preview = preview && AppSettings.shared.previewTabs
 
@@ -41,6 +69,16 @@ extension WorkspaceModel {
         }
 
         let name = (path as NSString).lastPathComponent
+
+        // Локальная картинка — так же вкладкой просмотра, как и серверная.
+        if MediaKind(path: path) == .image, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+            present(OpenDoc(mode: .image, title: name, absPath: path, relPath: nil,
+                            kind: nil, isLocal: true, imageData: data, isPreview: preview))
+            pane = .file
+            selectedPath = path
+            return
+        }
+
         let file = LocalFS.read(path)
 
         switch file {

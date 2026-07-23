@@ -465,7 +465,142 @@ struct FileTree: View {
     @State private var dropTarget: String?
     @FocusState private var focused: Bool
 
+    // Поиск по содержимому. Состояние живёт здесь, а не в модели: это черновик запроса,
+    // и переживать закрытие панели ему незачем.
+    @State private var searchOpen = false
+    @State private var query = ""
+    @State private var searchDir = ""
+    @State private var searchExclude = ""
+    @State private var hits: [RemoteSearch.Hit]?
+    @State private var searching = false
+    @FocusState private var queryFocused: Bool
+
     var body: some View {
+        VStack(spacing: 0) {
+            bar
+            Divider()
+
+            if searchOpen {
+                searchPanel
+            } else {
+                tree
+            }
+        }
+    }
+
+    /// Заголовок дерева: обновить и найти. Обновление здесь не дублирует поллинг — тот
+    /// перечитывает дерево только вслед за git-статусом, и файл, появившийся мимо git
+    /// (лог, артефакт сборки), сам не всплывёт.
+    private var bar: some View {
+        HStack(spacing: 4) {
+            Text(model.workspace.isLocal ? "Файлы" : "Файлы на сервере")
+                .font(D.Text.caption)
+                .foregroundStyle(Theme.secondary)
+
+            Spacer()
+
+            IconButton(icon: "magnifyingglass", size: 11,
+                       help: searchOpen ? "Назад к дереву" : "Искать в содержимом файлов") {
+                searchOpen.toggle()
+                if searchOpen { queryFocused = true }
+            }
+            IconButton(icon: "arrow.clockwise", size: 11, help: "Перечитать дерево и git") {
+                Task { await model.reloadTree() }
+            }
+        }
+        .padding(.leading, D.Pad.bar)
+        .padding(.trailing, 4)
+        .frame(height: D.s(30))
+        .background(Theme.bg)
+    }
+
+    // MARK: Поиск по содержимому
+
+    private var searchPanel: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 6) {
+                TextField("Что ищем в файлах", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($queryFocused)
+                    .onSubmit { Task { await runSearch() } }
+
+                // Куда смотреть и куда не лезть — по относительному пути от корня проекта.
+                HStack(spacing: 6) {
+                    TextField("Папка (пусто — весь проект)", text: $searchDir)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { Task { await runSearch() } }
+                    TextField("Исключить: node_modules, dist", text: $searchExclude)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { Task { await runSearch() } }
+                }
+                .font(D.Text.caption)
+
+                HStack {
+                    if searching { ProgressView().controlSize(.small) }
+                    if let hits {
+                        Text(hits.isEmpty
+                             ? "Не нашлось"
+                             : "Совпадений: \(hits.count)\(hits.count == RemoteSearch.maxHits ? "+" : "")")
+                            .font(D.Text.caption)
+                            .foregroundStyle(Theme.secondary)
+                    }
+                    Spacer()
+                    Button("Найти") { Task { await runSearch() } }
+                        .controlSize(.small)
+                        .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || searching)
+                }
+            }
+            .padding(10)
+
+            Divider()
+
+            if let hits, !hits.isEmpty {
+                results(hits)
+            } else {
+                Spacer()
+            }
+        }
+    }
+
+    private func runSearch() async {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        searching = true
+        defer { searching = false }
+        hits = await model.searchContent(query: query, dir: searchDir, exclude: searchExclude)
+    }
+
+    /// Результаты сгруппированы по файлам: десять совпадений в одном файле — это один файл,
+    /// а не десять одинаковых заголовков.
+    private func results(_ hits: [RemoteSearch.Hit]) -> some View {
+        let groups = Dictionary(grouping: hits, by: \.path)
+            .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
+
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(groups, id: \.key) { path, fileHits in
+                    Text(path)
+                        .font(.system(size: D.s(11), weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .padding(.horizontal, D.Pad.row)
+                        .padding(.top, 8)
+                        .padding(.bottom, 2)
+
+                    ForEach(fileHits) { hit in
+                        SearchHitRow(hit: hit) {
+                            Task { await model.openSearchHit(hit) }
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: Дерево
+
+    private var tree: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(model.rows) { row in
@@ -565,6 +700,37 @@ struct FileTree: View {
 }
 
 /// Приём файлов с Mac. Показывает подсветку цели и отдаёт модели список URL'ов.
+/// Одно совпадение поиска: номер строки и её текст. Клик открывает файл.
+private struct SearchHitRow: View {
+    let hit: RemoteSearch.Hit
+    let onOpen: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("\(hit.line)")
+                .font(.system(size: D.s(10), design: .monospaced))
+                .foregroundStyle(Theme.secondary)
+                .frame(width: 38, alignment: .trailing)
+
+            Text(hit.text)
+                .font(.system(size: D.s(11), design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, D.Pad.row)
+        .frame(height: D.Size.row)
+        .background(RowBackground(selected: false, hovering: hovering, target: false))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+        .onHover { hovering = $0 }
+        .help("\(hit.path):\(hit.line)")
+    }
+}
+
 struct UploadDrop: DropDelegate {
     let dir: String
     let model: WorkspaceModel
@@ -762,6 +928,8 @@ struct TreeRowView: View {
         Button("Новая папка…") { Task { await model.makeFolder(in: row.entry.path) } }
             .disabled(!model.canWrite)
         Button("Копировать путь") { model.copyPathToPasteboard(row.entry.path) }
+        Button("Скачать на Mac…" + suffix) { Task { await model.download(row.entry.path) } }
+            .disabled(row.entry.isDir && !many)
 
         Divider()
 

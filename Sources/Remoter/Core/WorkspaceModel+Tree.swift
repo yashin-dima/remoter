@@ -19,6 +19,41 @@ extension WorkspaceModel {
         }
     }
 
+    /// Кнопка «Обновить» над деревом: перечитать раскрытые папки и git разом.
+    ///
+    /// Поллинг перечитывает дерево только когда меняется git-статус — файл, появившийся на
+    /// сервере мимо git (лог, артефакт сборки, `.gitignore`-жилец), сам в дереве не всплывёт.
+    /// Для этого и кнопка.
+    func reloadTree() async {
+        beginBusy()
+        defer { endBusy() }
+        await reloadExpandedDirs()
+        rebuildRows()
+        await refresh(force: true)
+    }
+
+    /// Поиск по содержимому файлов проекта. nil — ошибка (и она уже показана тостом).
+    func searchContent(query: String, dir: String, exclude: String) async -> [RemoteSearch.Hit]? {
+        let root = repoRoot ?? basePath
+        do {
+            return try await RemoteSearch.search(
+                conn: conn, root: root, query: query,
+                dir: dir.trimmingCharacters(in: .whitespaces),
+                exclude: exclude,
+                isRepo: repoRoot != nil
+            )
+        } catch {
+            toast(.error, "Поиск не удался: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Открыть найденное: путь у результата — от корня поиска.
+    func openSearchHit(_ hit: RemoteSearch.Hit) async {
+        let root = repoRoot ?? basePath
+        await openFile(root + "/" + hit.path, preview: true)
+    }
+
     func reloadExpandedDirs() async {
         for dir in tree.expanded where tree.children[dir] != nil {
             tree.children[dir] = (try? await RemoteFS.list(conn: conn, dir: dir)) ?? tree.children[dir]

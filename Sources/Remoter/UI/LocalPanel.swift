@@ -33,6 +33,22 @@ struct LocalPanel: View {
             }
         }
         .onAppear { model.reloadLocalTree() }
+        // Drop — на всю панель, включая пустую: в пустую папку первый файл и бросают.
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            Task {
+                let urls = await Self.fileURLs(from: providers)
+                await MainActor.run { model.importLocal(urls: urls) }
+            }
+            return true
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Theme.accent, lineWidth: 2)
+                    .padding(3)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     private var header: some View {
@@ -113,6 +129,21 @@ struct LocalPanel: View {
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .contentShape(Rectangle())
+    }
+
+    @State private var dropTargeted = false
+
+    /// Провайдеры перетаскивания → URL файлов. Асинхронно: NSItemProvider отдаёт их колбэком.
+    private static func fileURLs(from providers: [NSItemProvider]) async -> [URL] {
+        var urls: [URL] = []
+        for p in providers where p.hasItemConformingToTypeIdentifier("public.file-url") {
+            let url: URL? = await withCheckedContinuation { cont in
+                _ = p.loadObject(ofClass: URL.self) { url, _ in cont.resume(returning: url) }
+            }
+            if let url { urls.append(url) }
+        }
+        return urls
     }
 }
 

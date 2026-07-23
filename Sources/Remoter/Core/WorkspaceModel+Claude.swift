@@ -355,10 +355,18 @@ extension WorkspaceModel {
         return path.trimmingCharacters(in: junk)
     }
 
-    /// Путь из терминала → вкладка редактора.
+    /// Путь из терминала → вкладка редактора, просмотр или проигрыватель.
     private func openPath(_ link: String) async {
         let path = Self.filePath(fromLink: link)
         guard !path.isEmpty else { return }
+
+        // Сначала — диск этого Mac. Claude печатает и ЛОКАЛЬНЫЕ пути: скриншоты из буфера
+        // (.attachments) и файлы своей рабочей папки лежат здесь, а не на сервере. Раньше такой
+        // путь искался по ssh на сервере — и честно «не находился», хотя файл вот он.
+        if let local = localCandidate(path) {
+            openLocalMedia(local)
+            return
+        }
 
         // Относительный путь — от корня проекта: именно так его и печатает Claude.
         let root = repoRoot ?? basePath
@@ -373,8 +381,57 @@ extension WorkspaceModel {
             return
         }
 
+        // Видео и аудио в редакторе не показать — скачиваем во временный файл и отдаём
+        // системному проигрывателю. Картинки открывает openFile — своей вкладкой просмотра.
+        if let kind = MediaKind(path: abs), kind != .image {
+            await openRemoteMedia(abs, kind: kind)
+            return
+        }
+
         pane = .file
         await openFile(abs)
+    }
+
+    /// Файл с таким путём на диске этого Mac, если он там есть. Относительные пути меряем
+    /// от рабочей папки Claude — он пишет их относительно себя.
+    private func localCandidate(_ path: String) -> URL? {
+        let expanded = (path as NSString).expandingTildeInPath
+        let candidates = [
+            expanded.hasPrefix("/") ? expanded : nil,
+            localPath.isEmpty ? nil : localPath + "/" + path,
+        ].compactMap { $0 }
+
+        for c in candidates {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: c, isDirectory: &isDir), !isDir.boolValue {
+                return URL(fileURLWithPath: c)
+            }
+        }
+        return nil
+    }
+
+    /// Локальный файл: медиа — системе (Просмотр, QuickTime), остальное — в Finder-открытие
+    /// текстом мы не лезем: локальные текстовые файлы открываются из панели Local, а сюда
+    /// приходят в основном скриншоты.
+    private func openLocalMedia(_ url: URL) {
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Видео/аудио с сервера: во временный файл — и системному проигрывателю.
+    private func openRemoteMedia(_ abs: String, kind: MediaKind) async {
+        let name = (abs as NSString).lastPathComponent
+        toast(.success, "Скачиваю \(kind.title) «\(name)»…")
+        do {
+            let data = try await RemoteFS.download(conn: conn, path: abs)
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("remoter-media", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let file = dir.appendingPathComponent(name)
+            try data.write(to: file, options: .atomic)
+            NSWorkspace.shared.open(file)
+        } catch {
+            toast(.error, "Не удалось открыть «\(name)»: \(error.localizedDescription)")
+        }
     }
 
     /// Claude начал отвечать / закончил. Приходит его же хуками (см. LocalWorkspace).

@@ -9,8 +9,17 @@ struct EditorPane: View {
         VStack(spacing: 0) {
             header
             Divider()
-            MonacoView(bridge: model.monaco)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ZStack {
+                // Monaco смонтирован всегда: пересоздание WebView — это повторная загрузка
+                // редактора. Картинка просто рисуется ПОВЕРХ, когда вкладка — про неё.
+                MonacoView(bridge: model.monaco)
+
+                if let doc = model.doc, doc.mode == .image {
+                    ImageViewer(data: doc.imageData, title: doc.title)
+                        .background(Theme.surface)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -102,4 +111,48 @@ struct MonacoView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView { bridge.webView }
     func updateNSView(_ view: WKWebView, context: Context) {}
+}
+
+/// Просмотр картинки во вкладке редактора.
+///
+/// Скриншоты и ассеты — обычные жители репозитория, и «бинарный файл, показать нечего»
+/// на клик по ним — не ответ. Картинка вписывается в окно; фактический размер — в подписи.
+struct ImageViewer: View {
+    let data: Data?
+    let title: String
+
+    var body: some View {
+        if let data, let image = NSImage(data: data) {
+            VStack(spacing: 8) {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(16)
+
+                // Размер в пикселях честнее, чем в точках: у ретины они различаются вдвое,
+                // а человеку важно, какого размера сам файл.
+                Text("\(pixelSize(image)) · \(byteString(data.count))")
+                    .font(D.Text.caption)
+                    .foregroundStyle(Theme.secondary)
+                    .padding(.bottom, 10)
+            }
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: "photo")
+                    .font(.system(size: D.s(34), weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text("\(title) — не удалось показать картинку")
+                    .font(D.Text.caption)
+                    .foregroundStyle(Theme.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func pixelSize(_ image: NSImage) -> String {
+        guard let rep = image.representations.first else { return "?" }
+        return "\(rep.pixelsWide) × \(rep.pixelsHigh)"
+    }
 }

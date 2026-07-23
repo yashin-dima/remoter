@@ -337,6 +337,20 @@ struct WorkspaceEditor: View {
     @State private var checkOK = false
     @State private var browsing = false
 
+    /// Пароль от сервера. В `Workspace` его нет и не будет: список проектов — открытый JSON на
+    /// диске, паролю там не место. Живёт он в Keychain, а здесь — только пока форма открыта.
+    ///
+    /// Загружаем по хосту, с которым форму открыли: пароль привязан к серверу, и у второго проекта
+    /// на той же машине он подставится сам, вводить заново не придётся.
+    @State private var password = ""
+    /// Чем поле было при открытии. Не трогали — не трогаем и связку ключей: иначе достаточно было
+    /// бы зайти в настройки и нажать «Сохранить», чтобы случайно стереть пароль (или переписать
+    /// его тем, что успело подставиться в поле).
+    @State private var passwordAtOpen = ""
+    /// Ключ, под которым пароль лежал при открытии: сервер могли сменить прямо в этой форме,
+    /// и тогда пароль надо перенести на новый, а не оставить у старого.
+    @State private var passwordAccount = ""
+
     // Иконка проекта. Держим её в форме и записываем только при сохранении: передумали и нажали
     // «Отмена» — на диске ничего не поменялось.
     @State private var iconImage: NSImage?
@@ -473,7 +487,10 @@ struct WorkspaceEditor: View {
             }
             .formStyle(.grouped)
             .textFieldStyle(.roundedBorder)
-            .onAppear { iconImage = ProjectIcon.cached(for: workspace.id) }
+            .onAppear {
+                iconImage = ProjectIcon.cached(for: workspace.id)
+                loadPassword()
+            }
 
             Text(hint)
                 .font(.caption)
@@ -517,7 +534,8 @@ struct WorkspaceEditor: View {
             RemotePathPicker(
                 host: workspace.host.trimmingCharacters(in: .whitespaces),
                 port: workspace.port,
-                extraArgs: workspace.extraSSHArgs
+                extraArgs: workspace.extraSSHArgs,
+                password: password
             ) { picked in
                 workspace.path = picked
                 nameFromFolder(picked)
@@ -655,6 +673,11 @@ struct WorkspaceEditor: View {
         }
         TextField("Порт", text: portText, prompt: Text("22 (по умолчанию)"))
         TextField("Опции ssh", text: optionsText, prompt: Text("необязательно: -J bastion -i ~/.ssh/ключ"))
+
+        SecureField("Пароль", text: $password, prompt: Text("необязательно: если сервер пускает по паролю"))
+        Text("Хранится в связке ключей macOS, а не в списке проектов, и подставляется сам, когда сервер спросит пароль. Привязан к серверу: другой проект на этой же машине подхватит его сам. Пустое поле — пароль не сохранён (а был сохранён — забудем). Вход по ключу это не отменяет: есть ключ — ssh войдёт по нему, и пароль не понадобится.")
+            .font(.caption)
+            .foregroundStyle(Theme.secondary)
     }
 
     @ViewBuilder
@@ -719,11 +742,36 @@ struct WorkspaceEditor: View {
         workspace.name = (path as NSString).lastPathComponent
     }
 
+    // MARK: - Пароль
+
+    private func loadPassword() {
+        guard !workspace.isLocal else { return }
+        password = Keychain.password(host: workspace.host, port: workspace.port) ?? ""
+        passwordAtOpen = password
+        passwordAccount = Keychain.account(host: workspace.host, port: workspace.port)
+    }
+
+    /// В связку ключей лезем, только если пароль правда меняли — или если сменился сам сервер
+    /// и пароль надо перенести на новый.
+    ///
+    /// Просто «всегда записывать поле» нельзя: не прочитайся пароль (в доступе отказали, связка
+    /// заперта) — поле оказалось бы пустым, и первое же «Сохранить» стёрло бы настоящий пароль,
+    /// хотя его никто не трогал.
+    private func savePassword() {
+        guard !workspace.isLocal else { return }
+        let account = Keychain.account(host: workspace.host, port: workspace.port)
+        guard password != passwordAtOpen || account != passwordAccount else { return }
+        Keychain.save(password, host: workspace.host, port: workspace.port)
+    }
+
+    // MARK: - Сохранение
+
     private func save() {
         workspace.path = trimmedPath
         nameFromFolder(workspace.path)
 
-        // Иконку пишем только здесь: нажали «Отмена» — на диске ничего не изменилось.
+        // Иконку и пароль пишем только здесь: нажали «Отмена» — ни на диске, ни в связке ключей
+        // ничего не изменилось.
         if iconChanged {
             if let iconData {
                 ProjectIcon.store(iconData, for: workspace.id)
@@ -731,6 +779,7 @@ struct WorkspaceEditor: View {
                 ProjectIcon.forget(workspace.id)
             }
         }
+        savePassword()
 
         onSave(workspace)
         dismiss()
@@ -752,7 +801,10 @@ struct WorkspaceEditor: View {
             : SSHConnection(
                 host: workspace.host.trimmingCharacters(in: .whitespaces),
                 port: workspace.port,
-                extraArgs: workspace.extraSSHArgs
+                extraArgs: workspace.extraSSHArgs,
+                // Проект ещё не сохранён — в связке ключей пароля нет. Берём тот, что в поле,
+                // иначе проверка спрашивала бы пароль, который человек только что ввёл рядом.
+                password: password
             )
         await conn.connect()
 
